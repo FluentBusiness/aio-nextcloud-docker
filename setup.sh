@@ -46,6 +46,9 @@ TIMESTAMP=$(date +"%Y-%m-%d_%H-%M-%S")
 REPORT_FILE="report_${TIMESTAMP}.txt"
 CHANGELOG_BODY=""
 
+# Переменная для детального отчета по портам
+UFW_REPORT_INFO="Фаервол не настраивался в этом запуске (статус неизвестен)."
+
 log_change() {
     local component="$1"
     local file_path="$2"
@@ -85,7 +88,7 @@ update_system() {
     log_change "SYSTEM UPDATE" "System Packages" "apt update & upgrade" "Откат не требуется"
 }
 
-# --- 2. ГЕНЕРАЦИЯ КЛЮЧА ---
+# --- 2. ГЕНЕРАЦИЯ КЛЮЧА (С PUTTY) ---
 generate_auto_key() {
     echo ""
     info "--- АВТО-СОЗДАНИЕ КЛЮЧА ДОСТУПА ---"
@@ -114,7 +117,7 @@ generate_auto_key() {
         rm ./temp_access_key ./temp_access_key.pub ./temp_access_key.ppk
         
         info "✅ Ключи созданы (OpenSSH и PuTTY)."
-        log_change "SSH KEY" "~/.ssh/authorized_keys" "Добавлен новый ключ (включая .ppk)" "Удалить строку из authorized_keys"
+        log_change "SSH KEY" "~/.ssh/authorized_keys" "Добавлен новый ключ (включая .ppk версию в отчете)" "Удалить строку из authorized_keys"
     fi
 }
 
@@ -172,16 +175,40 @@ setup_firewall() {
         sudo ufw --force reset > /dev/null
         sudo ufw default deny incoming
         sudo ufw default allow outgoing
-        for port in 22 80 443 8080 3478; do sudo ufw allow "$port"/tcp; done
-        sudo ufw allow 443/udp
-        sudo ufw allow 3478/udp
+        
+        # Настройка правил
+        sudo ufw allow 22/tcp comment 'SSH'
+        sudo ufw allow 80/tcp comment 'HTTP Nextcloud'
+        sudo ufw allow 443/tcp comment 'HTTPS Nextcloud'
+        sudo ufw allow 443/udp comment 'HTTP/3 Nextcloud'
+        sudo ufw allow 8080/tcp comment 'AIO Interface'
+        sudo ufw allow 3478/tcp comment 'Talk TURN TCP'
+        sudo ufw allow 3478/udp comment 'Talk TURN UDP'
+        
         echo "y" | sudo ufw enable
+        
         info "✅ UFW активен."
-        log_change "FIREWALL" "UFW" "Включен UFW, открыты порты" "sudo ufw disable"
+        
+        # Формирование детального текста для отчета
+        UFW_REPORT_INFO="
+СТАТУС: Активен (Active)
+ПОЛИТИКА ПО УМОЛЧАНИЮ: Deny Incoming / Allow Outgoing
+
+ОТКРЫТЫЕ ПОРТЫ:
+  - 22/tcp   : SSH (Удаленный доступ)
+  - 80/tcp   : HTTP (Веб-сервер / Let's Encrypt)
+  - 443/tcp  : HTTPS (Основной трафик)
+  - 443/udp  : HTTP/3 (QUIC протокол)
+  - 8080/tcp : Панель управления AIO
+  - 3478/tcp : Nextcloud Talk (TURN)
+  - 3478/udp : Nextcloud Talk (TURN)
+"
+        
+        log_change "FIREWALL" "UFW" "Включен UFW, открыты порты 22,80,443,8080,3478" "sudo ufw disable"
     fi
 }
 
-# --- 5. SSH (ИСПРАВЛЕННАЯ ЛОГИКА) ---
+# --- 5. SSH ---
 harden_ssh() {
     echo ""
     info "--- SSH ---"
@@ -192,35 +219,32 @@ harden_ssh() {
         TARGET_SSH_DIR="/root/.ssh"
         if [[ "$INSTALL_HOME" == "/home/$NC_USER" ]]; then TARGET_SSH_DIR="/home/$NC_USER/.ssh"; fi
         
-        # 1. Проверка наличия ключей (КРИТИЧНО)
         if [ ! -s "$TARGET_SSH_DIR/authorized_keys" ]; then
-            error "ОШИБКА: В $TARGET_SSH_DIR/authorized_keys пусто! Отключение паролей заблокирует вход. Отмена."
+            error "ОШИБКА: Нет ключей! Отмена."
             return
         fi
         
         SSH_BACKUP_NAME="/etc/ssh/sshd_config.bak.$(date +%F_%R)"
         sudo cp /etc/ssh/sshd_config "$SSH_BACKUP_NAME"
         
-        # 2. ЯВНО ВКЛЮЧАЕМ вход по ключам (защита от случайной блокировки)
+        # Гарантируем вход по ключу
         sudo sed -i 's/^#\?PubkeyAuthentication .*/PubkeyAuthentication yes/' /etc/ssh/sshd_config
-        # Если строки не было совсем, добавляем:
         if ! grep -q "^PubkeyAuthentication" /etc/ssh/sshd_config; then 
             echo "PubkeyAuthentication yes" | sudo tee -a /etc/ssh/sshd_config
         fi
 
-        # 3. Отключаем пароли
+        # Отключаем пароли
         sudo sed -i 's/^#\?PasswordAuthentication .*/PasswordAuthentication no/' /etc/ssh/sshd_config
         sudo sed -i 's/^#\?ChallengeResponseAuthentication .*/ChallengeResponseAuthentication no/' /etc/ssh/sshd_config
         sudo sed -i 's/^#\?UsePAM .*/UsePAM no/' /etc/ssh/sshd_config
         
-        # 4. Отключаем Root (только если создан новый юзер)
         if [[ "$INSTALL_HOME" == "/home/$NC_USER" ]]; then
              sudo sed -i 's/^PermitRootLogin.*/PermitRootLogin no/' /etc/ssh/sshd_config
              if ! grep -q "^PermitRootLogin" /etc/ssh/sshd_config; then echo "PermitRootLogin no" | sudo tee -a /etc/ssh/sshd_config; fi
         fi
         
         sudo service ssh restart
-        info "✅ SSH защищен (Keys: ON, Pass: OFF)."
+        info "✅ SSH защищен."
         log_change "SSH" "/etc/ssh/sshd_config" "PubkeyAuth yes, PasswordAuth no" "cp $SSH_BACKUP_NAME /etc/ssh/sshd_config"
     fi
 }
@@ -258,7 +282,7 @@ EOF
     fi
 }
 
-# --- 7. RCLONE / S3 ---
+# --- 7. RCLONE / S3 (С ПРОВЕРКОЙ) ---
 setup_rclone() {
     echo ""
     info "--- S3 STORAGE (RCLONE) ---"
@@ -408,7 +432,6 @@ configure_memory() {
     echo "  RAM: ${TOTAL_RAM} MB"
     echo ""
     
-    # Рекомендации
     if [[ "$CURRENT_CPU" -ge 4 && "$TOTAL_RAM" -ge 5800 ]]; then
          echo -e "${GREEN}РЕКОМЕНДАЦИЯ: Система мощная (4+ ядра, 6GB+ RAM).${NC}"
          echo -e "${GREEN}Рекомендуется установить 1024M или 2048M.${NC}"
@@ -562,7 +585,11 @@ Rclone Mount: $RCLONE_MOUNT_POINT
 -------------------
 $CHANGELOG_BODY
 
-3. POST-INSTALL TIPS
+3. СТАТУС ФАЕРВОЛА (UFW)
+------------------------
+$UFW_REPORT_INFO
+
+4. POST-INSTALL TIPS
 --------------------
 Apps to install:
 1. Two-Factor TOTP Provider
