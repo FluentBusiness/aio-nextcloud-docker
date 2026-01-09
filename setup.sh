@@ -422,3 +422,47 @@ fi
 REPORT_TEXT="
 ==========================================================
  ОТЧЕТ О ЗАПУСКЕ СКРИПТА (CHANGELOG)
+ Дата: $TIMESTAMP
+ Файл: $PROJECT_DIR/$REPORT_FILE
+==========================================================
+
+1. ОБЩАЯ ИНФОРМАЦИЯ
+-------------------
+Домен:        $USER_DOMAIN
+IP:           $SERVER_IP
+Config Dir:   $PROJECT_DIR
+Data Dir:     $DATA_DIR
+Rclone Mount: $RCLONE_MOUNT_POINT
+Пользователь: $NC_USER
+
+2. ЖУРНАЛ ИЗМЕНЕНИЙ
+-------------------
+$CHANGELOG_BODY
+
+3. POST-INSTALL TIPS
+--------------------
+Apps to install:
+1. Two-Factor TOTP Provider
+2. Password Policy
+3. Antivirus for Files (ClamAV)
+4. Suspicious Login Detection
+5. Ransomware protection
+
+==========================================================
+!!! ФИНАЛЬНЫЙ ШАГ !!!
+==========================================================
+Панель: https://$USER_DOMAIN:8080
+РЕЖИМ:  ИНКОГНИТО (PRIVATE MODE)
+==========================================================
+"
+
+echo "$REPORT_TEXT" > "$PROJECT_DIR/$REPORT_FILE"
+if [[ "$(pwd)" != "$PROJECT_DIR" ]]; then 
+    ln -sf "$PROJECT_DIR/$REPORT_FILE" ./latest_install_report.txt
+fi
+
+clear
+echo -e "${GREEN}$REPORT_TEXT${NC}"
+if [[ -n "$KEY_SECTION" ]]; then echo -e "${YELLOW}$KEY_SECTION${NC}"; fi
+echo ""
+info "✅ Отчет сохранен: $PROJECT_DIR/$REPORT_FILE"
