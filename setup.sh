@@ -50,7 +50,7 @@ MOUNT_DIR="/mnt/"
 # Глобальные переменные состояния
 GENERATED_PRIVATE_KEY=""
 KEY_CREATED_MSG="Нет"
-RCLONE_MOUNT_POINT="Не настроено" # <-- Переменная для отчета
+RCLONE_MOUNT_POINT="Не настроено"
 
 # --- 1. ОБНОВЛЕНИЕ ---
 update_system() {
@@ -204,7 +204,7 @@ EOF
     fi
 }
 
-# --- 7. RCLONE / S3 ---
+# --- 7. RCLONE / S3 (ИСПРАВЛЕНО) ---
 setup_rclone() {
     echo ""
     info "--- S3 STORAGE (RCLONE) ---"
@@ -212,12 +212,17 @@ setup_rclone() {
     read -p "Установить и настроить Rclone? (y/N): " CONFIRM < /dev/tty
 
     if [[ "$CONFIRM" == "y" || "$CONFIRM" == "Y" ]]; then
-        # 1. Установка
-        info "Установка Rclone и Fuse..."
+        # 1. Установка зависимостей (ДОБАВЛЕНО: unzip)
+        info "Установка Rclone, Fuse и Unzip..."
+        
+        # Сначала ставим пакеты, чтобы curl скрипт не падал
+        sudo apt-get install -y fuse3 unzip
+
+        # Проверка и установка Rclone
         if ! command -v rclone &> /dev/null; then
-            sudo -v ; curl https://rclone.org/install.sh | sudo bash
+            curl https://rclone.org/install.sh | sudo bash
         fi
-        sudo apt-get install -y fuse3
+        
         sudo sed -i 's/#user_allow_other/user_allow_other/' /etc/fuse.conf
 
         # 2. Сбор данных
@@ -292,7 +297,7 @@ EOF
         
         sleep 2
         if systemctl is-active --quiet rclone-backup.service; then
-            RCLONE_MOUNT_POINT="$TARGET_MOUNT" # <-- Сохраняем для отчета
+            RCLONE_MOUNT_POINT="$TARGET_MOUNT"
             info "✅ Rclone смонтирован в: $TARGET_MOUNT"
             log_change "RCLONE S3" "$TARGET_MOUNT" \
                 "Установлен Rclone, создан конфиг s3_backup, смонтирован бакет $S3_BUCKET" \
