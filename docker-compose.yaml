@@ -77,6 +77,13 @@ configs:
       https://YOUR_DOMAIN:443 {
         reverse_proxy localhost:11000
         encode zstd gzip
+        header {
+            Strict-Transport-Security "max-age=15552000;"
+            Referrer-Policy "no-referrer"
+            X-Content-Type-Options "nosniff"
+            X-Frame-Options "SAMEORIGIN"
+            X-XSS-Protection "1; mode=block"
+        }
       }
 
 volumes:
