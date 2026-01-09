@@ -1,10 +1,9 @@
 #!/bin/bash
 
 # --- НАСТРОЙКИ ---
-# Ссылка на репозиторий
 DEFAULT_YAML_URL="https://raw.githubusercontent.com/FluentBusiness/aio-nextcloud-docker/refs/heads/master/docker-compose.yaml"
 COMPOSE_FILENAME="docker-compose.yaml"
-REPORT_FILE="install_report.txt"
+# Имя отчета будет сгенерировано динамически ниже
 PLACEHOLDER="YOUR_DOMAIN" 
 NC_USER="nextcloud" 
 
@@ -12,7 +11,7 @@ YAML_URL="${1:-$DEFAULT_YAML_URL}"
 
 set -e
 
-# Цвета
+# --- ЦВЕТА ---
 GREEN='\033[1;32m'
 YELLOW='\033[1;33m'
 RED='\033[1;31m'
@@ -22,21 +21,40 @@ info() { echo -e "${GREEN}[INFO]${NC} $1"; }
 warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
 error() { echo -e "${RED}[ERROR]${NC} $1"; exit 1; }
 
-# Глобальные переменные состояния
-SSH_BACKUP_NAME="Не создавался"
-GENERATED_PRIVATE_KEY=""
-KEY_CREATED_MSG="Нет"
-LOG_USER="Без изменений"
-LOG_SSH="Без изменений"
-LOG_UFW="Без изменений"
-LOG_TOOLS="Без изменений"
-LOG_DOCKER_CFG="Без изменений"
+# --- ПЕРЕМЕННЫЕ ДЛЯ ОТЧЕТА ---
+# Генерируем уникальное имя файла с датой и временем
+TIMESTAMP=$(date +"%Y-%m-%d_%H-%M-%S")
+REPORT_FILE="report_${TIMESTAMP}.txt"
 
-# Переменные путей (Default values)
+# Переменная, куда будем складывать весь лог изменений
+CHANGELOG_BODY=""
+
+# Функция для записи изменений в лог
+log_change() {
+    local component="$1"
+    local file_path="$2"
+    local change_desc="$3"
+    local revert_instr="$4"
+
+    CHANGELOG_BODY="${CHANGELOG_BODY}
+--------------------------------------------------------------------------------
+КОМПОНЕНТ:  $component
+ФАЙЛ:       $file_path
+ИЗМЕНЕНИЕ:  $change_desc
+КАК ВЕРНУТЬ:
+$revert_instr
+"
+}
+
+# Переменные путей (Default)
 INSTALL_HOME="/root"
 PROJECT_DIR="/root"
 DATA_DIR="/mnt/ncdata"
 MOUNT_DIR="/mnt/"
+
+# Глобальные переменные состояния
+GENERATED_PRIVATE_KEY=""
+KEY_CREATED_MSG="Нет"
 
 # --- 1. ОБНОВЛЕНИЕ ---
 update_system() {
@@ -46,6 +64,10 @@ update_system() {
     sudo -E apt-get -qqy -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" upgrade
     sudo apt-get -y autoremove
     info "Сервер обновлен."
+    
+    log_change "SYSTEM UPDATE" "System Packages" \
+        "Выполнено apt update & upgrade" \
+        "Откат системных обновлений сложен и обычно не требуется."
 }
 
 # --- 2. ГЕНЕРАЦИЯ КЛЮЧА ---
@@ -55,20 +77,17 @@ generate_auto_key() {
     read -p "Создать новый SSH-ключ? (y/N): " CONFIRM < /dev/tty
 
     if [[ "$CONFIRM" == "y" || "$CONFIRM" == "Y" ]]; then
-        # Генерируем во временный файл
         ssh-keygen -t ed25519 -C "generated-by-install-script" -f ./temp_access_key -N "" -q
-        
-        # Добавляем текущему пользователю (root)
         mkdir -p ~/.ssh && chmod 700 ~/.ssh
         cat ./temp_access_key.pub >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys
-        
-        # Сохраняем в переменную для вывода в конце
         GENERATED_PRIVATE_KEY=$(cat ./temp_access_key)
         KEY_CREATED_MSG="Да"
-        
-        # Удаляем временные файлы с диска
         rm ./temp_access_key ./temp_access_key.pub
-        info "✅ Ключ создан и временно добавлен текущему пользователю."
+        info "✅ Ключ создан."
+        
+        log_change "SSH KEY" "~/.ssh/authorized_keys" \
+            "Добавлен новый публичный ключ (Ed25519)" \
+            "Отредактируйте ~/.ssh/authorized_keys и удалите последнюю строку."
     fi
 }
 
@@ -82,13 +101,14 @@ setup_new_user() {
     if [[ "$CONFIRM" == "y" || "$CONFIRM" == "Y" ]]; then
         if id "$NC_USER" &>/dev/null; then
             warn "Пользователь $NC_USER уже существует."
-            LOG_USER="Пользователь $NC_USER уже существовал."
+            log_change "USER" "/etc/passwd" \
+                "Пользователь $NC_USER уже существовал. Изменений не вносилось." \
+                "-"
         else
             info "Создание $NC_USER..."
             adduser --gecos "" "$NC_USER"
             usermod -aG sudo "$NC_USER"
             
-            # Копируем ключи (включая только что созданный) новому юзеру
             mkdir -p "/home/$NC_USER/.ssh"
             if [ -f ~/.ssh/authorized_keys ]; then
                 cp ~/.ssh/authorized_keys "/home/$NC_USER/.ssh/"
@@ -97,14 +117,14 @@ setup_new_user() {
                 chown -R "$NC_USER:$NC_USER" "/home/$NC_USER/.ssh"
             fi
             
-            # Блокируем пароль root
             passwd -l root
+            info "✅ Пользователь создан, ключи скопированы, Root отключен."
             
-            LOG_USER="1. Пользователь: $NC_USER\n   2. Root отключен\n   3. Пути изменены на /home/$NC_USER"
-            info "✅ Пользователь создан, ключи скопированы."
+            log_change "USER & SECURITY" "/etc/passwd & /etc/shadow" \
+                "1. Создан юзер $NC_USER (sudo). 2. Пароль root заблокирован." \
+                "sudo passwd -u root (разблок. root); sudo deluser --remove-home $NC_USER"
         fi
         
-        # ОБНОВЛЕНИЕ ПУТЕЙ (Переключаемся на структуру /home)
         INSTALL_HOME="/home/$NC_USER"
         PROJECT_DIR="$INSTALL_HOME/aio-config"
         DATA_DIR="$INSTALL_HOME/ncdata"
@@ -116,11 +136,9 @@ setup_new_user() {
         PROJECT_DIR=$(pwd)
         DATA_DIR="/mnt/ncdata"
         MOUNT_DIR="/mnt/"
+        
+        log_change "USER" "-" "Используется текущий пользователь (Root)" "-"
     fi
-    
-    info "📂 Config Dir: $PROJECT_DIR"
-    info "📂 Data Dir:   $DATA_DIR"
-    info "📂 Mount Dir:  $MOUNT_DIR"
 }
 
 # --- 4. ФАЕРВОЛ ---
@@ -133,13 +151,15 @@ setup_firewall() {
         sudo ufw --force reset > /dev/null
         sudo ufw default deny incoming
         sudo ufw default allow outgoing
-        # Открываем порты
         for port in 22 80 443 8080 3478; do sudo ufw allow "$port"/tcp; done
         sudo ufw allow 443/udp
         sudo ufw allow 3478/udp
         echo "y" | sudo ufw enable
-        LOG_UFW="Активен"
         info "✅ UFW активен."
+        
+        log_change "FIREWALL" "UFW (iptables)" \
+            "Включен UFW. Открыты порты: 22, 80, 443, 8080, 3478." \
+            "sudo ufw disable (Выключить) ИЛИ sudo ufw reset (Сбросить правила)"
     fi
 }
 
@@ -149,7 +169,6 @@ harden_ssh() {
     info "--- SSH ---"
     read -p "Отключить вход по паролю и Root Login? (y/N): " CONFIRM < /dev/tty
     if [[ "$CONFIRM" == "y" || "$CONFIRM" == "Y" ]]; then
-        # Проверяем наличие ключей в ЦЕЛЕВОЙ папке
         TARGET_SSH_DIR="/root/.ssh"
         if [[ "$INSTALL_HOME" == "/home/$NC_USER" ]]; then TARGET_SSH_DIR="/home/$NC_USER/.ssh"; fi
         
@@ -161,20 +180,24 @@ harden_ssh() {
         SSH_BACKUP_NAME="/etc/ssh/sshd_config.bak.$(date +%F_%R)"
         sudo cp /etc/ssh/sshd_config "$SSH_BACKUP_NAME"
         
-        # Отключаем пароли
         sudo sed -i 's/^#\?PasswordAuthentication .*/PasswordAuthentication no/' /etc/ssh/sshd_config
         sudo sed -i 's/^#\?ChallengeResponseAuthentication .*/ChallengeResponseAuthentication no/' /etc/ssh/sshd_config
         sudo sed -i 's/^#\?UsePAM .*/UsePAM no/' /etc/ssh/sshd_config
         
-        # Если мы переехали в /home, можно смело отключать Root Login в SSH
+        CHANGE_DESC="PasswordAuthentication -> no."
+        
         if [[ "$INSTALL_HOME" == "/home/$NC_USER" ]]; then
              sudo sed -i 's/^PermitRootLogin.*/PermitRootLogin no/' /etc/ssh/sshd_config
              if ! grep -q "^PermitRootLogin" /etc/ssh/sshd_config; then echo "PermitRootLogin no" | sudo tee -a /etc/ssh/sshd_config; fi
+             CHANGE_DESC="$CHANGE_DESC Также PermitRootLogin -> no."
         fi
         
         sudo service ssh restart
-        LOG_SSH="Защищен (No Password, No Root)"
         info "✅ SSH защищен."
+        
+        log_change "SSH CONFIG" "/etc/ssh/sshd_config" \
+            "$CHANGE_DESC (Бэкап создан: $SSH_BACKUP_NAME)" \
+            "sudo cp $SSH_BACKUP_NAME /etc/ssh/sshd_config && sudo service ssh restart"
     fi
 }
 
@@ -206,8 +229,11 @@ APT::Periodic::Update-Package-Lists "1";
 APT::Periodic::Unattended-Upgrade "1";
 EOF
         sudo systemctl restart unattended-upgrades
-        LOG_TOOLS="Установлены"
         info "✅ Инструменты установлены."
+        
+        log_change "SECURITY PACKAGES" "/etc/fail2ban/jail.local" \
+            "Установлены Fail2ban (защита SSH) и Unattended-Upgrades." \
+            "sudo apt remove fail2ban unattended-upgrades"
     fi
 }
 
@@ -233,13 +259,14 @@ configure_memory() {
     if grep -q "NEXTCLOUD_MEMORY_LIMIT:" "$COMPOSE_FULL_PATH"; then
         sed -i "s/NEXTCLOUD_MEMORY_LIMIT: .*/NEXTCLOUD_MEMORY_LIMIT: $CHOSEN_MEM/" "$COMPOSE_FULL_PATH"
     fi
-    LOG_DOCKER_CFG="$LOG_DOCKER_CFG\n   - Память: $CHOSEN_MEM"
+    log_change "NEXTCLOUD CONFIG" "$COMPOSE_FULL_PATH" \
+        "Установлен лимит памяти PHP: $CHOSEN_MEM" \
+        "Отредактируйте файл и измените NEXTCLOUD_MEMORY_LIMIT"
 }
 
 # --- ИСПОЛНЕНИЕ ---
 update_system
 
-# Устанавливаем Docker СРАЗУ, чтобы usermod -aG docker сработал
 info "Установка Docker..."
 if ! command -v curl &> /dev/null; then sudo apt-get install -y curl; fi
 PACKAGES="apt-transport-https ca-certificates software-properties-common gnupg dnsutils"
@@ -251,6 +278,7 @@ if ! command -v docker &> /dev/null; then
     echo "deb [arch=""$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu ""$(. /etc/os-release && echo "$VERSION_CODENAME") stable" | sudo tee /etc/apt/sources.list.d/docker.list >/dev/null
     sudo apt-get update && sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
     sudo ln -sfv /usr/libexec/docker/cli-plugins/docker-compose /usr/local/bin/docker-compose
+    log_change "DOCKER" "System Packages" "Установлен Docker и Docker Compose" "sudo apt purge docker-ce docker-ce-cli"
 fi
 
 generate_auto_key
@@ -273,16 +301,19 @@ if curl --output /dev/null --silent --head --fail "$YAML_URL"; then
     curl -L "$YAML_URL" -o "$COMPOSE_FULL_PATH"
 else error "Ошибка загрузки!"; fi
 
+log_change "CONFIG FILE" "$COMPOSE_FULL_PATH" \
+    "Скачан свежий docker-compose.yaml с GitHub" \
+    "Удалить файл: rm $COMPOSE_FULL_PATH"
+
 # --- НАСТРОЙКА ПУТЕЙ В YAML ---
 info "Настройка путей в docker-compose..."
 
-# Замена NEXTCLOUD_DATADIR
 sed -i "s|NEXTCLOUD_DATADIR: /mnt/ncdata|NEXTCLOUD_DATADIR: $DATA_DIR|g" "$COMPOSE_FULL_PATH"
-LOG_DOCKER_CFG="$LOG_DOCKER_CFG\n   - DATADIR: $DATA_DIR"
-
-# Замена NEXTCLOUD_MOUNT
 sed -i "s|NEXTCLOUD_MOUNT: /mnt/|NEXTCLOUD_MOUNT: $MOUNT_DIR|g" "$COMPOSE_FULL_PATH"
-LOG_DOCKER_CFG="$LOG_DOCKER_CFG\n   - MOUNT: $MOUNT_DIR"
+
+log_change "NEXTCLOUD CONFIG" "$COMPOSE_FULL_PATH" \
+    "Изменены пути: DATADIR -> $DATA_DIR, MOUNT -> $MOUNT_DIR" \
+    "Отредактируйте файл вручную"
 
 configure_memory
 
@@ -297,23 +328,24 @@ elif [[ "$SERVER_IP" != "$DOMAIN_IP" ]]; then warn "IP отличаются. П�
 
 if grep -q "$PLACEHOLDER" "$COMPOSE_FULL_PATH"; then
     sed -i "s/$PLACEHOLDER/$USER_DOMAIN/g" "$COMPOSE_FULL_PATH"
-    LOG_DOCKER_CFG="$LOG_DOCKER_CFG\n   - Домен: $USER_DOMAIN"
+    log_change "NEXTCLOUD CONFIG" "$COMPOSE_FULL_PATH" "Установлен домен: $USER_DOMAIN" "Редактирование файла"
 fi
 
 # Назначение прав пользователю
 if [[ "$INSTALL_HOME" == "/home/$NC_USER" ]]; then
     info "Назначение прав владельца пользователю $NC_USER..."
     usermod -aG docker "$NC_USER" || true
-    # Рекурсивно отдаем всю домашнюю папку
     chown -R "$NC_USER:$NC_USER" "$INSTALL_HOME"
+    log_change "PERMISSIONS" "$INSTALL_HOME" \
+        "Права на папку переданы пользователю $NC_USER" \
+        "chown -R root:root $INSTALL_HOME"
 fi
 
 info "Запуск контейнеров..."
 cd "$PROJECT_DIR"
 sudo docker compose up -d
 
-# --- ОТЧЕТ ---
-CURRENT_DATE=$(date "+%Y-%m-%d %H:%M:%S")
+# --- ФОРМИРОВАНИЕ ИТОГОВОГО ОТЧЕТА ---
 KEY_SECTION=""
 if [[ -n "$GENERATED_PRIVATE_KEY" ]]; then
 KEY_SECTION="
@@ -329,27 +361,28 @@ fi
 
 REPORT_TEXT="
 ==========================================================
-ОТЧЕТ ОБ УСТАНОВКЕ NEXTCLOUD AIO
-Дата: $CURRENT_DATE
+ ОТЧЕТ О ЗАПУСКЕ СКРИПТА (CHANGELOG)
+ Дата запуска: $TIMESTAMP
+ Файл отчета:  $PROJECT_DIR/$REPORT_FILE
 ==========================================================
 
-1. ЛОКАЦИЯ УСТАНОВКИ
---------------------
-Пользователь: $NC_USER
-Конфиги:      $PROJECT_DIR/$COMPOSE_FILENAME
-Данные:       $DATA_DIR
-Mount Point:  $MOUNT_DIR
-
-2. ЖУРНАЛ ИЗМЕНЕНИЙ
+1. ОБЩАЯ ИНФОРМАЦИЯ
 -------------------
-[A] ПОЛЬЗОВАТЕЛИ: $LOG_USER
-[B] SSH:          $LOG_SSH
-[C] ФАЕРВОЛ:      $LOG_UFW
-[D] CONFIG:       $LOG_DOCKER_CFG
-[E] НОВЫЙ КЛЮЧ:   $KEY_CREATED_MSG
+Домен:        $USER_DOMAIN
+IP сервера:   $SERVER_IP
+Папка конфига: $PROJECT_DIR
+Папка данных:  $DATA_DIR
+Пользователь:  $NC_USER
 
-3. РЕКОМЕНДАЦИИ ПО БЕЗОПАСНОСТИ (NEXTCLOUD APPS)
+2. ДЕТАЛЬНЫЙ ЖУРНАЛ ИЗМЕНЕНИЙ (ЧТО БЫЛО СДЕЛАНО)
 ------------------------------------------------
+Ниже перечислены все изменения, внесенные этим запуском скрипта,
+и инструкции по их отмене (Revert).
+$CHANGELOG_BODY
+
+3. РЕКОМЕНДАЦИИ ПО БЕЗОПАСНОСТИ (POST-INSTALL)
+----------------------------------------------
+Включите в Nextcloud Apps:
 1. Two-Factor TOTP Provider
 2. Password Policy
 3. Antivirus for Files (ClamAV)
@@ -357,21 +390,23 @@ Mount Point:  $MOUNT_DIR
 5. Ransomware protection
 
 ==========================================================
-!!! ФИНАЛЬНЫЙ ШАГ (ВХОД В СИСТЕМУ) !!!
+!!! ФИНАЛЬНЫЙ ШАГ !!!
 ==========================================================
-Адрес панели: https://$USER_DOMAIN:8080
-
-ВАЖНАЯ РЕКОМЕНДАЦИЯ:
-Открывайте эту ссылку в режиме ИНКОГНИТО (PRIVATE MODE) браузера!
-Это необходимо, чтобы избежать ошибок кэширования и SSL при первом входе.
+Панель управления: https://$USER_DOMAIN:8080
+ОТКРЫВАЙТЕ В РЕЖИМЕ ИНКОГНИТО!
 ==========================================================
 "
 
+# Сохраняем отчет (Уникальный файл для каждого запуска)
 echo "$REPORT_TEXT" > "$PROJECT_DIR/$REPORT_FILE"
-if [[ "$(pwd)" != "$PROJECT_DIR" ]]; then ln -sf "$PROJECT_DIR/$REPORT_FILE" ./$REPORT_FILE; fi
+
+# Если мы запускали не из папки проекта, делаем симлинк на последний отчет
+if [[ "$(pwd)" != "$PROJECT_DIR" ]]; then 
+    ln -sf "$PROJECT_DIR/$REPORT_FILE" ./latest_install_report.txt
+fi
 
 clear
 echo -e "${GREEN}$REPORT_TEXT${NC}"
 if [[ -n "$KEY_SECTION" ]]; then echo -e "${YELLOW}$KEY_SECTION${NC}"; fi
 echo ""
-info "✅ Отчет сохранен в: $PROJECT_DIR/$REPORT_FILE"
+info "✅ Отчет сохранен в файл: $PROJECT_DIR/$REPORT_FILE"
