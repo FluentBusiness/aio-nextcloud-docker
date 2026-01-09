@@ -204,7 +204,7 @@ EOF
     fi
 }
 
-# --- 7. RCLONE / S3 (ИСПРАВЛЕНО) ---
+# --- 7. RCLONE / S3 (С ПРОВЕРКОЙ) ---
 setup_rclone() {
     echo ""
     info "--- S3 STORAGE (RCLONE) ---"
@@ -212,36 +212,65 @@ setup_rclone() {
     read -p "Установить и настроить Rclone? (y/N): " CONFIRM < /dev/tty
 
     if [[ "$CONFIRM" == "y" || "$CONFIRM" == "Y" ]]; then
-        # 1. Установка зависимостей (ДОБАВЛЕНО: unzip)
+        # --- СООБЩЕНИЕ ---
+        echo ""
+        info "⏳ ПОЖАЛУЙСТА, ПОДОЖДИТЕ!" 
+        info "Сейчас начнется установка зависимостей (Unzip, Fuse) и самого Rclone."
+        echo ""
+
+        # 1. Установка Rclone, Fuse и Unzip
         info "Установка Rclone, Fuse и Unzip..."
         
-        # Сначала ставим пакеты, чтобы curl скрипт не падал
         sudo apt-get install -y fuse3 unzip
 
-        # Проверка и установка Rclone
         if ! command -v rclone &> /dev/null; then
             curl https://rclone.org/install.sh | sudo bash
         fi
         
         sudo sed -i 's/#user_allow_other/user_allow_other/' /etc/fuse.conf
 
-        # 2. Сбор данных
-        echo ""
-        echo "Введите данные S3 (Object Storage):"
-        read -p "S3 Endpoint (напр. https://storage.yandexcloud.net): " S3_ENDPOINT
-        read -p "S3 Access Key: " S3_ACCESS_KEY
-        read -s -p "S3 Secret Key: " S3_SECRET_KEY
-        echo ""
-        read -p "Имя бакета (Bucket Name): " S3_BUCKET
-        
+        # 2. Сбор данных С ПРОВЕРКОЙ
         REMOTE_NAME="s3_backup"
         
-        # 3. Конфиг
-        mkdir -p /root/.config/rclone/
+        while true; do
+            echo ""
+            echo "---------------------------------------------------"
+            echo "Введите данные S3 (Object Storage):"
+            echo "---------------------------------------------------"
+            read -p "S3 Endpoint (напр. https://storage.yandexcloud.net): " S3_ENDPOINT
+            read -p "S3 Access Key: " S3_ACCESS_KEY
+            read -s -p "S3 Secret Key: " S3_SECRET_KEY
+            echo ""
+            read -p "Имя бакета (Bucket Name): " S3_BUCKET
+            
+            # Создаем конфиг
+            mkdir -p /root/.config/rclone/
+            rclone config create "$REMOTE_NAME" s3 provider=Other env_auth=false access_key_id="$S3_ACCESS_KEY" secret_access_key="$S3_SECRET_KEY" endpoint="$S3_ENDPOINT" acl=private --non-interactive > /dev/null 2>&1
+
+            info "Проверка подключения к бакету '$S3_BUCKET'..."
+            
+            # Пробуем получить список (lsd) для проверки доступа
+            if rclone lsd "$REMOTE_NAME:$S3_BUCKET" --config /root/.config/rclone/rclone.conf > /dev/null 2>&1; then
+                info "✅ Успешное подключение! Данные верны."
+                break
+            else
+                error "❌ Ошибка подключения!" 
+                echo "Скорее всего, неверные ключи, Endpoint или имя бакета."
+                echo "Текст ошибки (последняя попытка):"
+                rclone lsd "$REMOTE_NAME:$S3_BUCKET" --config /root/.config/rclone/rclone.conf 2>&1 | head -n 2
+                
+                echo ""
+                read -p "Попробовать ввести данные заново? (y - да, n - пропустить настройку Rclone): " RETRY < /dev/tty
+                if [[ "$RETRY" != "y" && "$RETRY" != "Y" ]]; then
+                    warn "Пропуск настройки Rclone."
+                    return
+                fi
+            fi
+        done
+        
+        # 3. Настройка конфигов для пользователя
         mkdir -p /home/$NC_USER/.config/rclone/
         
-        rclone config create "$REMOTE_NAME" s3 provider=Other env_auth=false access_key_id="$S3_ACCESS_KEY" secret_access_key="$S3_SECRET_KEY" endpoint="$S3_ENDPOINT" acl=private --non-interactive
-
         # 4. Монтирование
         DEFAULT_MOUNT="$INSTALL_HOME/mnt/backup/borg"
         echo ""
@@ -300,7 +329,7 @@ EOF
             RCLONE_MOUNT_POINT="$TARGET_MOUNT"
             info "✅ Rclone смонтирован в: $TARGET_MOUNT"
             log_change "RCLONE S3" "$TARGET_MOUNT" \
-                "Установлен Rclone, создан конфиг s3_backup, смонтирован бакет $S3_BUCKET" \
+                "Установлен Rclone, проверено подключение, смонтирован бакет $S3_BUCKET" \
                 "sudo systemctl stop rclone-backup && sudo systemctl disable rclone-backup && sudo rm $SERVICE_FILE"
         else
             error "Не удалось запустить службу rclone! Проверьте 'systemctl status rclone-backup'"
