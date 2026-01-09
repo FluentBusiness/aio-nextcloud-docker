@@ -49,6 +49,7 @@ MOUNT_DIR="/mnt/"
 
 # Глобальные переменные состояния
 GENERATED_PRIVATE_KEY=""
+GENERATED_PPK_KEY="" # <-- Новая переменная для PuTTY
 KEY_CREATED_MSG="Нет"
 RCLONE_MOUNT_POINT="Не настроено"
 
@@ -63,21 +64,41 @@ update_system() {
     log_change "SYSTEM UPDATE" "System Packages" "apt update & upgrade" "Откат не требуется"
 }
 
-# --- 2. ГЕНЕРАЦИЯ КЛЮЧА ---
+# --- 2. ГЕНЕРАЦИЯ КЛЮЧА (С PUTTY) ---
 generate_auto_key() {
     echo ""
     info "--- АВТО-СОЗДАНИЕ КЛЮЧА ДОСТУПА ---"
-    read -p "Создать новый SSH-ключ? (y/N): " CONFIRM < /dev/tty
+    read -p "Создать новый SSH-ключ (OpenSSH + PuTTY)? (y/N): " CONFIRM < /dev/tty
 
     if [[ "$CONFIRM" == "y" || "$CONFIRM" == "Y" ]]; then
+        # Устанавливаем putty-tools для конвертации
+        info "Установка putty-tools..."
+        if ! dpkg -s putty-tools >/dev/null 2>&1; then
+            sudo apt-get install -y putty-tools
+        fi
+
+        # Генерируем OpenSSH ключ
         ssh-keygen -t ed25519 -C "generated-by-install-script" -f ./temp_access_key -N "" -q
+        
+        # Конвертируем в PPK (PuTTY)
+        info "Конвертация в формат PuTTY (.ppk)..."
+        puttygen ./temp_access_key -o ./temp_access_key.ppk -O private
+
+        # Добавляем в authorized_keys
         mkdir -p ~/.ssh && chmod 700 ~/.ssh
         cat ./temp_access_key.pub >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys
+        
+        # Читаем ключи в переменные
         GENERATED_PRIVATE_KEY=$(cat ./temp_access_key)
+        GENERATED_PPK_KEY=$(cat ./temp_access_key.ppk)
+        
         KEY_CREATED_MSG="Да"
-        rm ./temp_access_key ./temp_access_key.pub
-        info "✅ Ключ создан."
-        log_change "SSH KEY" "~/.ssh/authorized_keys" "Добавлен новый ключ" "Удалить строку из authorized_keys"
+        
+        # Уборка
+        rm ./temp_access_key ./temp_access_key.pub ./temp_access_key.ppk
+        
+        info "✅ Ключи созданы (OpenSSH и PuTTY)."
+        log_change "SSH KEY" "~/.ssh/authorized_keys" "Добавлен новый ключ (включая .ppk версию в отчете)" "Удалить строку из authorized_keys"
     fi
 }
 
@@ -212,6 +233,7 @@ setup_rclone() {
     read -p "Установить и настроить Rclone? (y/N): " CONFIRM < /dev/tty
 
     if [[ "$CONFIRM" == "y" || "$CONFIRM" == "Y" ]]; then
+        
         # --- СООБЩЕНИЕ ---
         echo ""
         info "⏳ ПОЖАЛУЙСТА, ПОДОЖДИТЕ!" 
@@ -444,11 +466,18 @@ KEY_SECTION=""
 if [[ -n "$GENERATED_PRIVATE_KEY" ]]; then
 KEY_SECTION="
 !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-!!! ВАШ НОВЫЙ ПРИВАТНЫЙ КЛЮЧ (ID_ED25519)              !!!
+!!! ВАШ НОВЫЙ ПРИВАТНЫЙ КЛЮЧ (OPENSSH)                 !!!
 !!! СКОПИРУЙТЕ ЕГО СЕЙЧАС!                             !!!
 !!! Вход: ssh -i key_file $NC_USER@$SERVER_IP
 !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 $GENERATED_PRIVATE_KEY
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+!!! ВАШ НОВЫЙ ПРИВАТНЫЙ КЛЮЧ (PuTTY .PPK)              !!!
+!!! Сохраните его в файл с расширением .ppk            !!!
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+$GENERATED_PPK_KEY
 !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 "
 fi
