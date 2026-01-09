@@ -282,7 +282,22 @@ EOF
     fi
 }
 
-# --- 7. RCLONE / S3 (С ПРОВЕРКОЙ) ---
+# --- 6.5. UTILITIES (MC) ---
+install_utilities() {
+    echo ""
+    info "--- ПОЛЕЗНЫЕ УТИЛИТЫ ---"
+    
+    ask_yes_no "Установить Midnight Commander (mc)?"
+    
+    if [[ "$CONFIRM" == "y" ]]; then
+        info "Установка MC..."
+        sudo apt-get install -y mc
+        info "✅ Midnight Commander установлен."
+        log_change "UTILITIES" "System Packages" "Установлен Midnight Commander (mc)" "sudo apt remove mc"
+    fi
+}
+
+# --- 7. RCLONE / S3 ---
 setup_rclone() {
     echo ""
     info "--- S3 STORAGE (RCLONE) ---"
@@ -484,6 +499,7 @@ setup_new_user
 setup_firewall
 harden_ssh
 install_security_tools
+install_utilities   # <-- УСТАНОВКА MC
 setup_rclone        
 check_hardware
 
