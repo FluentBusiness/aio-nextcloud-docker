@@ -20,6 +20,28 @@ info() { echo -e "${GREEN}[INFO]${NC} $1"; }
 warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
 error() { echo -e "${RED}[ERROR]${NC} $1"; exit 1; }
 
+# --- ФУНКЦИЯ ПРОВЕРКИ ВВОДА (НОВАЯ) ---
+# Запрашивает ввод до тех пор, пока не будет y или n
+ask_yes_no() {
+    local prompt="$1"
+    while true; do
+        read -p "$prompt (y/n): " INPUT < /dev/tty
+        case "$INPUT" in
+            [yY]|[yY][eE][sS])
+                CONFIRM="y"
+                return 0
+                ;;
+            [nN]|[nN][oO])
+                CONFIRM="n"
+                return 1
+                ;;
+            *)
+                echo -e "${YELLOW}Ошибка: Пожалуйста, введите 'y' (Да) или 'n' (Нет).${NC}"
+                ;;
+        esac
+    done
+}
+
 # --- ПЕРЕМЕННЫЕ ДЛЯ ОТЧЕТА ---
 TIMESTAMP=$(date +"%Y-%m-%d_%H-%M-%S")
 REPORT_FILE="report_${TIMESTAMP}.txt"
@@ -49,7 +71,7 @@ MOUNT_DIR="/mnt/"
 
 # Глобальные переменные состояния
 GENERATED_PRIVATE_KEY=""
-GENERATED_PPK_KEY="" # <-- Новая переменная для PuTTY
+GENERATED_PPK_KEY="" 
 KEY_CREATED_MSG="Нет"
 RCLONE_MOUNT_POINT="Не настроено"
 
@@ -64,41 +86,37 @@ update_system() {
     log_change "SYSTEM UPDATE" "System Packages" "apt update & upgrade" "Откат не требуется"
 }
 
-# --- 2. ГЕНЕРАЦИЯ КЛЮЧА (С PUTTY) ---
+# --- 2. ГЕНЕРАЦИЯ КЛЮЧА ---
 generate_auto_key() {
     echo ""
     info "--- АВТО-СОЗДАНИЕ КЛЮЧА ДОСТУПА ---"
-    read -p "Создать новый SSH-ключ (OpenSSH + PuTTY)? (y/N): " CONFIRM < /dev/tty
+    
+    # Использование новой функции проверки
+    ask_yes_no "Создать новый SSH-ключ (OpenSSH + PuTTY)?"
 
-    if [[ "$CONFIRM" == "y" || "$CONFIRM" == "Y" ]]; then
-        # Устанавливаем putty-tools для конвертации
+    if [[ "$CONFIRM" == "y" ]]; then
         info "Установка putty-tools..."
         if ! dpkg -s putty-tools >/dev/null 2>&1; then
             sudo apt-get install -y putty-tools
         fi
 
-        # Генерируем OpenSSH ключ
         ssh-keygen -t ed25519 -C "generated-by-install-script" -f ./temp_access_key -N "" -q
         
-        # Конвертируем в PPK (PuTTY)
         info "Конвертация в формат PuTTY (.ppk)..."
         puttygen ./temp_access_key -o ./temp_access_key.ppk -O private
 
-        # Добавляем в authorized_keys
         mkdir -p ~/.ssh && chmod 700 ~/.ssh
         cat ./temp_access_key.pub >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys
         
-        # Читаем ключи в переменные
         GENERATED_PRIVATE_KEY=$(cat ./temp_access_key)
         GENERATED_PPK_KEY=$(cat ./temp_access_key.ppk)
         
         KEY_CREATED_MSG="Да"
         
-        # Уборка
         rm ./temp_access_key ./temp_access_key.pub ./temp_access_key.ppk
         
         info "✅ Ключи созданы (OpenSSH и PuTTY)."
-        log_change "SSH KEY" "~/.ssh/authorized_keys" "Добавлен новый ключ (включая .ppk версию в отчете)" "Удалить строку из authorized_keys"
+        log_change "SSH KEY" "~/.ssh/authorized_keys" "Добавлен новый ключ (включая .ppk)" "Удалить строку из authorized_keys"
     fi
 }
 
@@ -107,9 +125,10 @@ setup_new_user() {
     echo ""
     info "--- БЕЗОПАСНОСТЬ И ПУТИ ---"
     echo "Рекомендуется: создать пользователя '$NC_USER' и установить Nextcloud в /home/$NC_USER."
-    read -p "Выполнить? (y/N): " CONFIRM < /dev/tty
     
-    if [[ "$CONFIRM" == "y" || "$CONFIRM" == "Y" ]]; then
+    ask_yes_no "Выполнить?"
+    
+    if [[ "$CONFIRM" == "y" ]]; then
         if id "$NC_USER" &>/dev/null; then
             warn "Пользователь $NC_USER уже существует."
             log_change "USER" "/etc/passwd" "Пользователь уже был" "-"
@@ -147,8 +166,10 @@ setup_new_user() {
 setup_firewall() {
     echo ""
     info "--- ФАЕРВОЛ (UFW) ---"
-    read -p "Настроить UFW? (y/N): " CONFIRM < /dev/tty
-    if [[ "$CONFIRM" == "y" || "$CONFIRM" == "Y" ]]; then
+    
+    ask_yes_no "Настроить UFW?"
+    
+    if [[ "$CONFIRM" == "y" ]]; then
         sudo apt-get install -y ufw
         sudo ufw --force reset > /dev/null
         sudo ufw default deny incoming
@@ -166,8 +187,10 @@ setup_firewall() {
 harden_ssh() {
     echo ""
     info "--- SSH ---"
-    read -p "Отключить вход по паролю и Root Login? (y/N): " CONFIRM < /dev/tty
-    if [[ "$CONFIRM" == "y" || "$CONFIRM" == "Y" ]]; then
+    
+    ask_yes_no "Отключить вход по паролю и Root Login?"
+    
+    if [[ "$CONFIRM" == "y" ]]; then
         TARGET_SSH_DIR="/root/.ssh"
         if [[ "$INSTALL_HOME" == "/home/$NC_USER" ]]; then TARGET_SSH_DIR="/home/$NC_USER/.ssh"; fi
         
@@ -198,8 +221,10 @@ harden_ssh() {
 install_security_tools() {
     echo ""
     info "--- SECURITY TOOLS ---"
-    read -p "Установить Fail2Ban и Auto-Updates? (y/N): " CONFIRM < /dev/tty
-    if [[ "$CONFIRM" == "y" || "$CONFIRM" == "Y" ]]; then
+    
+    ask_yes_no "Установить Fail2Ban и Auto-Updates?"
+    
+    if [[ "$CONFIRM" == "y" ]]; then
         sudo apt-get install -y fail2ban
         cat <<EOF | sudo tee /etc/fail2ban/jail.local > /dev/null
 [sshd]
@@ -225,24 +250,23 @@ EOF
     fi
 }
 
-# --- 7. RCLONE / S3 (С ПРОВЕРКОЙ) ---
+# --- 7. RCLONE / S3 ---
 setup_rclone() {
     echo ""
     info "--- S3 STORAGE (RCLONE) ---"
     echo "Вы можете подключить S3-хранилище и примонтировать его как папку."
-    read -p "Установить и настроить Rclone? (y/N): " CONFIRM < /dev/tty
+    
+    ask_yes_no "Установить и настроить Rclone?"
 
-    if [[ "$CONFIRM" == "y" || "$CONFIRM" == "Y" ]]; then
-        
+    if [[ "$CONFIRM" == "y" ]]; then
         # --- СООБЩЕНИЕ ---
         echo ""
         info "⏳ ПОЖАЛУЙСТА, ПОДОЖДИТЕ!" 
         info "Сейчас начнется установка зависимостей (Unzip, Fuse) и самого Rclone."
         echo ""
 
-        # 1. Установка Rclone, Fuse и Unzip
+        # 1. Установка
         info "Установка Rclone, Fuse и Unzip..."
-        
         sudo apt-get install -y fuse3 unzip
 
         if ! command -v rclone &> /dev/null; then
@@ -271,7 +295,6 @@ setup_rclone() {
 
             info "Проверка подключения к бакету '$S3_BUCKET'..."
             
-            # Пробуем получить список (lsd) для проверки доступа
             if rclone lsd "$REMOTE_NAME:$S3_BUCKET" --config /root/.config/rclone/rclone.conf > /dev/null 2>&1; then
                 info "✅ Успешное подключение! Данные верны."
                 break
@@ -282,15 +305,16 @@ setup_rclone() {
                 rclone lsd "$REMOTE_NAME:$S3_BUCKET" --config /root/.config/rclone/rclone.conf 2>&1 | head -n 2
                 
                 echo ""
-                read -p "Попробовать ввести данные заново? (y - да, n - пропустить настройку Rclone): " RETRY < /dev/tty
-                if [[ "$RETRY" != "y" && "$RETRY" != "Y" ]]; then
+                # Здесь также используем проверку ввода
+                ask_yes_no "Попробовать ввести данные заново?"
+                if [[ "$CONFIRM" != "y" ]]; then
                     warn "Пропуск настройки Rclone."
                     return
                 fi
             fi
         done
         
-        # 3. Настройка конфигов для пользователя
+        # 3. Настройка конфигов
         mkdir -p /home/$NC_USER/.config/rclone/
         
         # 4. Монтирование
@@ -298,6 +322,8 @@ setup_rclone() {
         echo ""
         echo "Куда монтировать бакет?"
         echo "По умолчанию: $DEFAULT_MOUNT"
+        
+        # Здесь нельзя использовать ask_yes_no, так как нужен ввод пути
         read -p "Нажмите Enter для дефолта или введите свой путь: " CUSTOM_PATH < /dev/tty
         
         TARGET_MOUNT="${CUSTOM_PATH:-$DEFAULT_MOUNT}"
@@ -366,8 +392,9 @@ check_hardware() {
     CURRENT_CPU=$(nproc)
     REQ_CPU=4
     if [ "$CURRENT_CPU" -lt "$REQ_CPU" ]; then
-        warn "CPU < 4 ядер. Продолжить? (y/N): "
-        read C < /dev/tty; if [[ "$C" != "y" ]]; then exit 1; fi
+        warn "CPU < 4 ядер. Продолжить?"
+        ask_yes_no "Подтвердить продолжение?"
+        if [[ "$CONFIRM" != "y" ]]; then exit 1; fi
     fi
 }
 
@@ -442,8 +469,15 @@ if [[ -z "$USER_DOMAIN" ]]; then error "Пусто."; fi
 
 SERVER_IP=$(curl -s4 https://ifconfig.me)
 DOMAIN_IP=$(dig +short A "$USER_DOMAIN" | tail -n1)
-if [[ -z "$DOMAIN_IP" ]]; then warn "DNS не найден! Продолжить? (y/N)"; read C < /dev/tty; if [[ "$C" != "y" ]]; then exit 1; fi
-elif [[ "$SERVER_IP" != "$DOMAIN_IP" ]]; then warn "IP отличаются. Продолжить? (y/N)"; read C < /dev/tty; if [[ "$C" != "y" ]]; then exit 1; fi; fi
+if [[ -z "$DOMAIN_IP" ]]; then 
+    warn "DNS не найден!"
+    ask_yes_no "Продолжить?"
+    if [[ "$CONFIRM" != "y" ]]; then exit 1; fi
+elif [[ "$SERVER_IP" != "$DOMAIN_IP" ]]; then 
+    warn "IP отличаются."
+    ask_yes_no "Продолжить?"
+    if [[ "$CONFIRM" != "y" ]]; then exit 1; fi
+fi
 
 if grep -q "$PLACEHOLDER" "$COMPOSE_FULL_PATH"; then
     sed -i "s/$PLACEHOLDER/$USER_DOMAIN/g" "$COMPOSE_FULL_PATH"
