@@ -20,8 +20,7 @@ info() { echo -e "${GREEN}[INFO]${NC} $1"; }
 warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
 error() { echo -e "${RED}[ERROR]${NC} $1"; exit 1; }
 
-# --- ФУНКЦИЯ ПРОВЕРКИ ВВОДА (НОВАЯ) ---
-# Запрашивает ввод до тех пор, пока не будет y или n
+# --- ФУНКЦИЯ ПРОВЕРКИ ВВОДА ---
 ask_yes_no() {
     local prompt="$1"
     while true; do
@@ -91,7 +90,6 @@ generate_auto_key() {
     echo ""
     info "--- АВТО-СОЗДАНИЕ КЛЮЧА ДОСТУПА ---"
     
-    # Использование новой функции проверки
     ask_yes_no "Создать новый SSH-ключ (OpenSSH + PuTTY)?"
 
     if [[ "$CONFIRM" == "y" ]]; then
@@ -183,7 +181,7 @@ setup_firewall() {
     fi
 }
 
-# --- 5. SSH ---
+# --- 5. SSH (ИСПРАВЛЕННАЯ ЛОГИКА) ---
 harden_ssh() {
     echo ""
     info "--- SSH ---"
@@ -194,26 +192,36 @@ harden_ssh() {
         TARGET_SSH_DIR="/root/.ssh"
         if [[ "$INSTALL_HOME" == "/home/$NC_USER" ]]; then TARGET_SSH_DIR="/home/$NC_USER/.ssh"; fi
         
+        # 1. Проверка наличия ключей (КРИТИЧНО)
         if [ ! -s "$TARGET_SSH_DIR/authorized_keys" ]; then
-            error "ОШИБКА: Нет ключей! Отмена."
+            error "ОШИБКА: В $TARGET_SSH_DIR/authorized_keys пусто! Отключение паролей заблокирует вход. Отмена."
             return
         fi
         
         SSH_BACKUP_NAME="/etc/ssh/sshd_config.bak.$(date +%F_%R)"
         sudo cp /etc/ssh/sshd_config "$SSH_BACKUP_NAME"
         
+        # 2. ЯВНО ВКЛЮЧАЕМ вход по ключам (защита от случайной блокировки)
+        sudo sed -i 's/^#\?PubkeyAuthentication .*/PubkeyAuthentication yes/' /etc/ssh/sshd_config
+        # Если строки не было совсем, добавляем:
+        if ! grep -q "^PubkeyAuthentication" /etc/ssh/sshd_config; then 
+            echo "PubkeyAuthentication yes" | sudo tee -a /etc/ssh/sshd_config
+        fi
+
+        # 3. Отключаем пароли
         sudo sed -i 's/^#\?PasswordAuthentication .*/PasswordAuthentication no/' /etc/ssh/sshd_config
         sudo sed -i 's/^#\?ChallengeResponseAuthentication .*/ChallengeResponseAuthentication no/' /etc/ssh/sshd_config
         sudo sed -i 's/^#\?UsePAM .*/UsePAM no/' /etc/ssh/sshd_config
         
+        # 4. Отключаем Root (только если создан новый юзер)
         if [[ "$INSTALL_HOME" == "/home/$NC_USER" ]]; then
              sudo sed -i 's/^PermitRootLogin.*/PermitRootLogin no/' /etc/ssh/sshd_config
              if ! grep -q "^PermitRootLogin" /etc/ssh/sshd_config; then echo "PermitRootLogin no" | sudo tee -a /etc/ssh/sshd_config; fi
         fi
         
         sudo service ssh restart
-        info "✅ SSH защищен."
-        log_change "SSH" "/etc/ssh/sshd_config" "PasswordAuth no" "cp $SSH_BACKUP_NAME /etc/ssh/sshd_config"
+        info "✅ SSH защищен (Keys: ON, Pass: OFF)."
+        log_change "SSH" "/etc/ssh/sshd_config" "PubkeyAuth yes, PasswordAuth no" "cp $SSH_BACKUP_NAME /etc/ssh/sshd_config"
     fi
 }
 
@@ -259,13 +267,11 @@ setup_rclone() {
     ask_yes_no "Установить и настроить Rclone?"
 
     if [[ "$CONFIRM" == "y" ]]; then
-        # --- СООБЩЕНИЕ ---
         echo ""
         info "⏳ ПОЖАЛУЙСТА, ПОДОЖДИТЕ!" 
         info "Сейчас начнется установка зависимостей (Unzip, Fuse) и самого Rclone."
         echo ""
 
-        # 1. Установка
         info "Установка Rclone, Fuse и Unzip..."
         sudo apt-get install -y fuse3 unzip
 
@@ -275,7 +281,6 @@ setup_rclone() {
         
         sudo sed -i 's/#user_allow_other/user_allow_other/' /etc/fuse.conf
 
-        # 2. Сбор данных С ПРОВЕРКОЙ
         REMOTE_NAME="s3_backup"
         
         while true; do
@@ -289,7 +294,6 @@ setup_rclone() {
             echo ""
             read -p "Имя бакета (Bucket Name): " S3_BUCKET
             
-            # Создаем конфиг
             mkdir -p /root/.config/rclone/
             rclone config create "$REMOTE_NAME" s3 provider=Other env_auth=false access_key_id="$S3_ACCESS_KEY" secret_access_key="$S3_SECRET_KEY" endpoint="$S3_ENDPOINT" acl=private --non-interactive > /dev/null 2>&1
 
@@ -305,7 +309,6 @@ setup_rclone() {
                 rclone lsd "$REMOTE_NAME:$S3_BUCKET" --config /root/.config/rclone/rclone.conf 2>&1 | head -n 2
                 
                 echo ""
-                # Здесь также используем проверку ввода
                 ask_yes_no "Попробовать ввести данные заново?"
                 if [[ "$CONFIRM" != "y" ]]; then
                     warn "Пропуск настройки Rclone."
@@ -314,22 +317,18 @@ setup_rclone() {
             fi
         done
         
-        # 3. Настройка конфигов
         mkdir -p /home/$NC_USER/.config/rclone/
         
-        # 4. Монтирование
         DEFAULT_MOUNT="$INSTALL_HOME/mnt/backup/borg"
         echo ""
         echo "Куда монтировать бакет?"
         echo "По умолчанию: $DEFAULT_MOUNT"
         
-        # Здесь нельзя использовать ask_yes_no, так как нужен ввод пути
         read -p "Нажмите Enter для дефолта или введите свой путь: " CUSTOM_PATH < /dev/tty
         
         TARGET_MOUNT="${CUSTOM_PATH:-$DEFAULT_MOUNT}"
         mkdir -p "$TARGET_MOUNT"
         
-        # Права доступа
         if [[ "$INSTALL_HOME" == "/home/$NC_USER" ]]; then
              chown -R "$NC_USER:$NC_USER" "$TARGET_MOUNT"
              mkdir -p "/home/$NC_USER/.config/rclone"
@@ -342,7 +341,6 @@ setup_rclone() {
              USER_GID="0"
         fi
 
-        # 5. Служба Systemd
         SERVICE_FILE="/etc/systemd/system/rclone-backup.service"
         info "Создание службы $SERVICE_FILE..."
         
@@ -400,13 +398,41 @@ check_hardware() {
 
 configure_memory() {
     TOTAL_RAM=$(free -m | awk '/^Mem:/{print $2}')
+    CURRENT_CPU=$(nproc)
     COMPOSE_FULL_PATH="$PROJECT_DIR/$COMPOSE_FILENAME"
-    if [ "$TOTAL_RAM" -lt 3800 ]; then CHOSEN_MEM="512M"; else
-        CHOSEN_MEM="1024M" 
-        echo "RAM: ${TOTAL_RAM}MB. 1) 1024M 2) 2048M"
-        read -p "Выбор: " M < /dev/tty
-        if [[ "$M" == "2" ]]; then CHOSEN_MEM="2048M"; fi
+    
+    echo ""
+    info "--- НАСТРОЙКА ПАМЯТИ (PHP MEMORY LIMIT) ---"
+    echo "Текущие ресурсы системы:"
+    echo "  CPU: ${CURRENT_CPU} ядер"
+    echo "  RAM: ${TOTAL_RAM} MB"
+    echo ""
+    
+    # Рекомендации
+    if [[ "$CURRENT_CPU" -ge 4 && "$TOTAL_RAM" -ge 5800 ]]; then
+         echo -e "${GREEN}РЕКОМЕНДАЦИЯ: Система мощная (4+ ядра, 6GB+ RAM).${NC}"
+         echo -e "${GREEN}Рекомендуется установить 1024M или 2048M.${NC}"
+    else
+         echo -e "${YELLOW}РЕКОМЕНДАЦИЯ: Ресурсов мало (менее 4 ядер или 6GB RAM).${NC}"
+         echo -e "${YELLOW}Рекомендуется оставить 512M (по умолчанию).${NC}"
     fi
+    
+    echo ""
+    echo "Выберите лимит памяти:"
+    echo "  1) 1024M (Для среднего объема)"
+    echo "  2) 2048M (Для большого количества файлов)"
+    echo "  Enter) 512M (По умолчанию)"
+    
+    read -p "Ваш выбор: " M < /dev/tty
+    
+    case "$M" in
+        1) CHOSEN_MEM="1024M" ;;
+        2) CHOSEN_MEM="2048M" ;;
+        *) CHOSEN_MEM="512M" ;;
+    esac
+    
+    info "Установлен лимит: $CHOSEN_MEM"
+
     if grep -q "NEXTCLOUD_MEMORY_LIMIT:" "$COMPOSE_FULL_PATH"; then
         sed -i "s/NEXTCLOUD_MEMORY_LIMIT: .*/NEXTCLOUD_MEMORY_LIMIT: $CHOSEN_MEM/" "$COMPOSE_FULL_PATH"
     fi
