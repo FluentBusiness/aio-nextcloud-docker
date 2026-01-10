@@ -58,7 +58,7 @@
 Зайдите на сервер по SSH под **root** и выполните одну команду:
 
 ```bash
-bash <(curl -sL [https://raw.githubusercontent.com/FluentBusiness/aio-nextcloud-docker/refs/heads/master/setup.sh](https://raw.githubusercontent.com/FluentBusiness/aio-nextcloud-docker/refs/heads/master/setup.sh))
+bash <(curl -sL https://raw.githubusercontent.com/FluentBusiness/aio-nextcloud-docker/refs/heads/master/setup.sh)
 ```
 
 
