@@ -4,7 +4,7 @@
 DEFAULT_YAML_URL="https://raw.githubusercontent.com/FluentBusiness/aio-nextcloud-docker/refs/heads/master/docker-compose.yaml"
 COMPOSE_FILENAME="docker-compose.yaml"
 PLACEHOLDER="YOUR_DOMAIN" 
-NC_USER="nextcloud" 
+NC_USER="root" # Работаем от root
 
 YAML_URL="${1:-$DEFAULT_YAML_URL}"
 
@@ -63,9 +63,9 @@ $revert_instr
 "
 }
 
-# --- ПУТИ (ЖЕСТКО ЗАФИКСИРОВАНЫ ПО DOCKER COMPOSE) ---
-INSTALL_HOME="/root"     # Где лежит конфиг
-PROJECT_DIR="/root"      # Рабочая папка скрипта
+# --- ПУТИ ---
+INSTALL_HOME="/root"     
+PROJECT_DIR="/root"      
 DATA_DIR="/mnt/ncdata"   # <--- СТРОГО КАК В DOCKER-COMPOSE
 MOUNT_DIR="/mnt/"        # <--- СТРОГО КАК В DOCKER-COMPOSE
 
@@ -115,46 +115,7 @@ generate_auto_key() {
     fi
 }
 
-# --- 3. СОЗДАНИЕ ПОЛЬЗОВАТЕЛЯ ---
-setup_new_user() {
-    echo ""
-    info "--- БЕЗОПАСНОСТЬ ---"
-    echo "Рекомендуется: создать пользователя '$NC_USER' для запуска Docker."
-    echo "Примечание: Данные Nextcloud останутся в $DATA_DIR"
-    
-    ask_yes_no "Создать пользователя и отключить root?"
-    
-    if [[ "$CONFIRM" == "y" ]]; then
-        if id "$NC_USER" &>/dev/null; then
-            warn "Пользователь $NC_USER уже существует."
-        else
-            info "Создание $NC_USER..."
-            adduser --gecos "" "$NC_USER"
-            usermod -aG sudo "$NC_USER"
-            mkdir -p "/home/$NC_USER/.ssh"
-            if [ -f ~/.ssh/authorized_keys ]; then
-                cp ~/.ssh/authorized_keys "/home/$NC_USER/.ssh/"
-                chmod 700 "/home/$NC_USER/.ssh"
-                chmod 600 "/home/$NC_USER/.ssh/authorized_keys"
-                chown -R "$NC_USER:$NC_USER" "/home/$NC_USER/.ssh"
-            fi
-            passwd -l root
-            info "✅ Пользователь создан."
-            log_change "USER" "User & Root" "Создан $NC_USER, Root disabled" "passwd -u root"
-        fi
-        
-        # Меняем только домашнюю папку конфигов, но НЕ пути к данным
-        INSTALL_HOME="/home/$NC_USER"
-        PROJECT_DIR="$INSTALL_HOME/aio-config"
-        # DATA_DIR и MOUNT_DIR остаются /mnt/ncdata и /mnt/
-    else
-        warn "Выбрана установка от имени Root."
-        INSTALL_HOME=$(pwd)
-        PROJECT_DIR=$(pwd)
-    fi
-}
-
-# --- 4. ФАЕРВОЛ ---
+# --- 3. ФАЕРВОЛ ---
 setup_firewall() {
     echo ""
     info "--- ФАЕРВОЛ (UFW) ---"
@@ -185,7 +146,7 @@ setup_firewall() {
     fi
 }
 
-# --- 5. SSH ---
+# --- 4. SSH ---
 harden_ssh() {
     echo ""
     info "--- SSH ---"
@@ -193,7 +154,6 @@ harden_ssh() {
     
     if [[ "$CONFIRM" == "y" ]]; then
         TARGET_SSH_DIR="/root/.ssh"
-        if [[ "$INSTALL_HOME" == "/home/$NC_USER" ]]; then TARGET_SSH_DIR="/home/$NC_USER/.ssh"; fi
         
         if [ ! -s "$TARGET_SSH_DIR/authorized_keys" ]; then
             error "ОШИБКА: Нет ключей! Отмена."
@@ -205,22 +165,22 @@ harden_ssh() {
         
         sudo sed -i 's/^#\?PubkeyAuthentication .*/PubkeyAuthentication yes/' /etc/ssh/sshd_config
         if ! grep -q "^PubkeyAuthentication" /etc/ssh/sshd_config; then echo "PubkeyAuthentication yes" | sudo tee -a /etc/ssh/sshd_config; fi
+        
         sudo sed -i 's/^#\?PasswordAuthentication .*/PasswordAuthentication no/' /etc/ssh/sshd_config
         sudo sed -i 's/^#\?ChallengeResponseAuthentication .*/ChallengeResponseAuthentication no/' /etc/ssh/sshd_config
         sudo sed -i 's/^#\?UsePAM .*/UsePAM no/' /etc/ssh/sshd_config
         
-        if [[ "$INSTALL_HOME" == "/home/$NC_USER" ]]; then
-             sudo sed -i 's/^PermitRootLogin.*/PermitRootLogin no/' /etc/ssh/sshd_config
-             if ! grep -q "^PermitRootLogin" /etc/ssh/sshd_config; then echo "PermitRootLogin no" | sudo tee -a /etc/ssh/sshd_config; fi
-        fi
+        # Разрешаем root логин (так как пароли отключены, вход только по ключу)
+        sudo sed -i 's/^PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config
+        if ! grep -q "^PermitRootLogin" /etc/ssh/sshd_config; then echo "PermitRootLogin yes" | sudo tee -a /etc/ssh/sshd_config; fi
         
         sudo service ssh restart
         info "✅ SSH защищен."
-        log_change "SSH" "/etc/ssh/sshd_config" "PasswordAuth no" "cp backup"
+        log_change "SSH" "/etc/ssh/sshd_config" "PasswordAuth no, PermitRootLogin yes" "cp backup"
     fi
 }
 
-# --- 6. TOOLS ---
+# --- 5. TOOLS ---
 install_security_tools() {
     echo ""
     info "--- SECURITY TOOLS ---"
@@ -263,7 +223,7 @@ install_utilities() {
     fi
 }
 
-# --- 7. RCLONE / S3 ---
+# --- 6. RCLONE / S3 ---
 setup_rclone() {
     echo ""
     info "--- S3 STORAGE (RCLONE) ---"
@@ -300,25 +260,12 @@ setup_rclone() {
             fi
         done
         
-        # Перенос конфига пользователю если нужно
-        if [[ "$INSTALL_HOME" == "/home/$NC_USER" ]]; then
-             mkdir -p "/home/$NC_USER/.config/rclone"
-             cp /root/.config/rclone/rclone.conf "/home/$NC_USER/.config/rclone/rclone.conf"
-             chown -R "$NC_USER:$NC_USER" "/home/$NC_USER/.config"
-             USER_UID=$(id -u "$NC_USER")
-             USER_GID=$(id -g "$NC_USER")
-        else
-             USER_UID="0"
-             USER_GID="0"
-        fi
-
         DEFAULT_MOUNT="$MOUNT_DIR/backup/borg"
         echo "Монтируем в $DEFAULT_MOUNT (внутри $MOUNT_DIR)"
         
         TARGET_MOUNT="$DEFAULT_MOUNT"
         mkdir -p "$TARGET_MOUNT"
-        if [[ "$INSTALL_HOME" == "/home/$NC_USER" ]]; then chown -R "$NC_USER:$NC_USER" "$TARGET_MOUNT"; fi
-
+        
         SERVICE_FILE="/etc/systemd/system/rclone-backup.service"
         
         cat <<EOF | sudo tee "$SERVICE_FILE" > /dev/null
@@ -330,10 +277,10 @@ After=network-online.target
 [Service]
 Type=notify
 ExecStart=/usr/bin/rclone mount $REMOTE_NAME:$S3_BUCKET $TARGET_MOUNT \\
-    --config=$INSTALL_HOME/.config/rclone/rclone.conf \\
+    --config=/root/.config/rclone/rclone.conf \\
     --allow-other \\
     --vfs-cache-mode writes \\
-    --uid=$USER_UID --gid=$USER_GID \\
+    --uid=0 --gid=0 \\
     --umask=002
 ExecStop=/bin/fusermount3 -u $TARGET_MOUNT
 Restart=always
@@ -351,7 +298,7 @@ EOF
     fi
 }
 
-# --- 8. ЖЕЛЕЗО ---
+# --- 7. ЖЕЛЕЗО ---
 check_hardware() {
     CURRENT_CPU=$(nproc)
     REQ_CPU=4
@@ -387,7 +334,6 @@ if ! command -v docker &> /dev/null; then
 fi
 
 generate_auto_key
-setup_new_user      
 setup_firewall
 harden_ssh
 install_security_tools
@@ -397,16 +343,9 @@ check_hardware
 
 # --- ЗАГРУЗКА ---
 info "Подготовка папок..."
-# Создаем папки ДЛЯ ДАННЫХ В /mnt (независимо от пользователя)
+# Создаем папки ДЛЯ ДАННЫХ В /mnt
 mkdir -p "$DATA_DIR"
 mkdir -p "$MOUNT_DIR"
-
-# Если есть пользователь, отдаем ему права на папки данных
-if [[ "$INSTALL_HOME" == "/home/$NC_USER" ]]; then
-    info "Настройка прав доступа для $NC_USER к /mnt..."
-    chown -R "$NC_USER:$NC_USER" "$DATA_DIR"
-    chown -R "$NC_USER:$NC_USER" "$MOUNT_DIR"
-fi
 
 mkdir -p "$PROJECT_DIR"
 info "Загрузка конфига в $PROJECT_DIR..."
@@ -429,11 +368,6 @@ if [[ -z "$USER_DOMAIN" ]]; then error "Пусто."; fi
 
 if grep -q "$PLACEHOLDER" "$COMPOSE_FULL_PATH"; then
     sed -i "s/$PLACEHOLDER/$USER_DOMAIN/g" "$COMPOSE_FULL_PATH"
-fi
-
-if [[ "$INSTALL_HOME" == "/home/$NC_USER" ]]; then
-    usermod -aG docker "$NC_USER" || true
-    chown -R "$NC_USER:$NC_USER" "$INSTALL_HOME"
 fi
 
 info "Запуск..."
