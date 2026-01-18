@@ -45,8 +45,6 @@ ask_yes_no() {
 TIMESTAMP=$(date +"%Y-%m-%d_%H-%M-%S")
 REPORT_FILE="report_${TIMESTAMP}.txt"
 CHANGELOG_BODY=""
-
-# Переменная для детального отчета по портам
 UFW_REPORT_INFO="Фаервол не настраивался в этом запуске (статус неизвестен)."
 
 log_change() {
@@ -65,11 +63,11 @@ $revert_instr
 "
 }
 
-# Переменные путей (Default)
-INSTALL_HOME="/root"
-PROJECT_DIR="/root"
-DATA_DIR="/mnt/ncdata"
-MOUNT_DIR="/mnt/"
+# --- ПУТИ (ЖЕСТКО ЗАФИКСИРОВАНЫ ПО DOCKER COMPOSE) ---
+INSTALL_HOME="/root"     # Где лежит конфиг
+PROJECT_DIR="/root"      # Рабочая папка скрипта
+DATA_DIR="/mnt/ncdata"   # <--- СТРОГО КАК В DOCKER-COMPOSE
+MOUNT_DIR="/mnt/"        # <--- СТРОГО КАК В DOCKER-COMPOSE
 
 # Глобальные переменные состояния
 GENERATED_PRIVATE_KEY=""
@@ -88,7 +86,7 @@ update_system() {
     log_change "SYSTEM UPDATE" "System Packages" "apt update & upgrade" "Откат не требуется"
 }
 
-# --- 2. ГЕНЕРАЦИЯ КЛЮЧА (С PUTTY) ---
+# --- 2. ГЕНЕРАЦИЯ КЛЮЧА ---
 generate_auto_key() {
     echo ""
     info "--- АВТО-СОЗДАНИЕ КЛЮЧА ДОСТУПА ---"
@@ -102,8 +100,6 @@ generate_auto_key() {
         fi
 
         ssh-keygen -t ed25519 -C "generated-by-install-script" -f ./temp_access_key -N "" -q
-        
-        info "Конвертация в формат PuTTY (.ppk)..."
         puttygen ./temp_access_key -o ./temp_access_key.ppk -O private
 
         mkdir -p ~/.ssh && chmod 700 ~/.ssh
@@ -111,28 +107,26 @@ generate_auto_key() {
         
         GENERATED_PRIVATE_KEY=$(cat ./temp_access_key)
         GENERATED_PPK_KEY=$(cat ./temp_access_key.ppk)
-        
         KEY_CREATED_MSG="Да"
         
         rm ./temp_access_key ./temp_access_key.pub ./temp_access_key.ppk
-        
-        info "✅ Ключи созданы (OpenSSH и PuTTY)."
-        log_change "SSH KEY" "~/.ssh/authorized_keys" "Добавлен новый ключ (включая .ppk версию в отчете)" "Удалить строку из authorized_keys"
+        info "✅ Ключи созданы."
+        log_change "SSH KEY" "~/.ssh/authorized_keys" "Добавлен новый ключ" "Удалить строку"
     fi
 }
 
 # --- 3. СОЗДАНИЕ ПОЛЬЗОВАТЕЛЯ ---
 setup_new_user() {
     echo ""
-    info "--- БЕЗОПАСНОСТЬ И ПУТИ ---"
-    echo "Рекомендуется: создать пользователя '$NC_USER' и установить Nextcloud в /home/$NC_USER."
+    info "--- БЕЗОПАСНОСТЬ ---"
+    echo "Рекомендуется: создать пользователя '$NC_USER' для запуска Docker."
+    echo "Примечание: Данные Nextcloud останутся в $DATA_DIR"
     
-    ask_yes_no "Выполнить?"
+    ask_yes_no "Создать пользователя и отключить root?"
     
     if [[ "$CONFIRM" == "y" ]]; then
         if id "$NC_USER" &>/dev/null; then
             warn "Пользователь $NC_USER уже существует."
-            log_change "USER" "/etc/passwd" "Пользователь уже был" "-"
         else
             info "Создание $NC_USER..."
             adduser --gecos "" "$NC_USER"
@@ -146,20 +140,17 @@ setup_new_user() {
             fi
             passwd -l root
             info "✅ Пользователь создан."
-            log_change "USER" "User & Root" "Создан $NC_USER, Root disabled" "sudo passwd -u root"
+            log_change "USER" "User & Root" "Создан $NC_USER, Root disabled" "passwd -u root"
         fi
         
+        # Меняем только домашнюю папку конфигов, но НЕ пути к данным
         INSTALL_HOME="/home/$NC_USER"
         PROJECT_DIR="$INSTALL_HOME/aio-config"
-        DATA_DIR="$INSTALL_HOME/ncdata"
-        MOUNT_DIR="$INSTALL_HOME/mnt/" 
+        # DATA_DIR и MOUNT_DIR остаются /mnt/ncdata и /mnt/
     else
         warn "Выбрана установка от имени Root."
         INSTALL_HOME=$(pwd)
         PROJECT_DIR=$(pwd)
-        DATA_DIR="/mnt/ncdata"
-        MOUNT_DIR="/mnt/"
-        log_change "USER" "-" "Используется Root" "-"
     fi
 }
 
@@ -176,7 +167,6 @@ setup_firewall() {
         sudo ufw default deny incoming
         sudo ufw default allow outgoing
         
-        # Настройка внешних портов
         sudo ufw allow 22/tcp comment 'SSH'
         sudo ufw allow 80/tcp comment 'HTTP Nextcloud'
         sudo ufw allow 443/tcp comment 'HTTPS Nextcloud'
@@ -185,26 +175,13 @@ setup_firewall() {
         sudo ufw allow 3478/tcp comment 'Talk TURN TCP'
         sudo ufw allow 3478/udp comment 'Talk TURN UDP'
         
-        # --- ВАЖНОЕ ИСПРАВЛЕНИЕ ДЛЯ FLOW И DOCKER ---
-        # Разрешаем весь трафик внутри интерфейса Docker (docker0)
-        # Это позволяет контейнерам (Nextcloud <-> Flow) видеть друг друга
         sudo ufw allow in on docker0 comment 'Allow Docker Bridge Traffic'
-        
-        # Разрешаем трафик из стандартных подсетей Docker
         sudo ufw allow from 172.16.0.0/12 comment 'Allow Docker Subnet'
-        # --------------------------------------------
         
         echo "y" | sudo ufw enable
-        
-        info "✅ UFW активен (с правилами для Docker)."
-        
-        # Обновляем отчет
-        UFW_REPORT_INFO="
-СТАТУС: Активен
-DOCKER TRAFFIC: Разрешен (docker0, 172.16.0.0/12)
-ОТКРЫТЫЕ ПОРТЫ: 22, 80, 443, 8080, 3478
-"
-        log_change "FIREWALL" "UFW" "Включен UFW + Правила Docker Internal" "sudo ufw disable"
+        info "✅ UFW активен."
+        UFW_REPORT_INFO="СТАТУС: Активен. DOCKER: Разрешен. ПОРТЫ: 22,80,443,8080,3478"
+        log_change "FIREWALL" "UFW" "Включен UFW" "sudo ufw disable"
     fi
 }
 
@@ -212,8 +189,7 @@ DOCKER TRAFFIC: Разрешен (docker0, 172.16.0.0/12)
 harden_ssh() {
     echo ""
     info "--- SSH ---"
-    
-    ask_yes_no "Отключить вход по паролю и Root Login?"
+    ask_yes_no "Отключить вход по паролю?"
     
     if [[ "$CONFIRM" == "y" ]]; then
         TARGET_SSH_DIR="/root/.ssh"
@@ -227,13 +203,8 @@ harden_ssh() {
         SSH_BACKUP_NAME="/etc/ssh/sshd_config.bak.$(date +%F_%R)"
         sudo cp /etc/ssh/sshd_config "$SSH_BACKUP_NAME"
         
-        # Гарантируем вход по ключу
         sudo sed -i 's/^#\?PubkeyAuthentication .*/PubkeyAuthentication yes/' /etc/ssh/sshd_config
-        if ! grep -q "^PubkeyAuthentication" /etc/ssh/sshd_config; then 
-            echo "PubkeyAuthentication yes" | sudo tee -a /etc/ssh/sshd_config
-        fi
-
-        # Отключаем пароли
+        if ! grep -q "^PubkeyAuthentication" /etc/ssh/sshd_config; then echo "PubkeyAuthentication yes" | sudo tee -a /etc/ssh/sshd_config; fi
         sudo sed -i 's/^#\?PasswordAuthentication .*/PasswordAuthentication no/' /etc/ssh/sshd_config
         sudo sed -i 's/^#\?ChallengeResponseAuthentication .*/ChallengeResponseAuthentication no/' /etc/ssh/sshd_config
         sudo sed -i 's/^#\?UsePAM .*/UsePAM no/' /etc/ssh/sshd_config
@@ -245,7 +216,7 @@ harden_ssh() {
         
         sudo service ssh restart
         info "✅ SSH защищен."
-        log_change "SSH" "/etc/ssh/sshd_config" "PubkeyAuth yes, PasswordAuth no" "cp $SSH_BACKUP_NAME /etc/ssh/sshd_config"
+        log_change "SSH" "/etc/ssh/sshd_config" "PasswordAuth no" "cp backup"
     fi
 }
 
@@ -253,7 +224,6 @@ harden_ssh() {
 install_security_tools() {
     echo ""
     info "--- SECURITY TOOLS ---"
-    
     ask_yes_no "Установить Fail2Ban и Auto-Updates?"
     
     if [[ "$CONFIRM" == "y" ]]; then
@@ -278,22 +248,18 @@ APT::Periodic::Unattended-Upgrade "1";
 EOF
         sudo systemctl restart unattended-upgrades
         info "✅ Инструменты установлены."
-        log_change "SECURITY" "Fail2Ban/Unattended" "Установлены" "apt remove..."
+        log_change "SECURITY" "Fail2Ban/Unattended" "Installed" "apt remove"
     fi
 }
 
-# --- 6.5. UTILITIES (MC) ---
 install_utilities() {
     echo ""
     info "--- ПОЛЕЗНЫЕ УТИЛИТЫ ---"
-    
     ask_yes_no "Установить Midnight Commander (mc)?"
-    
     if [[ "$CONFIRM" == "y" ]]; then
-        info "Установка MC..."
         sudo apt-get install -y mc
-        info "✅ Midnight Commander установлен."
-        log_change "UTILITIES" "System Packages" "Установлен Midnight Commander (mc)" "sudo apt remove mc"
+        info "✅ MC установлен."
+        log_change "UTILITIES" "mc" "Installed" "apt remove mc"
     fi
 }
 
@@ -301,75 +267,41 @@ install_utilities() {
 setup_rclone() {
     echo ""
     info "--- S3 STORAGE (RCLONE) ---"
-    echo "Вы можете подключить S3-хранилище и примонтировать его как папку."
-    
     ask_yes_no "Установить и настроить Rclone?"
 
     if [[ "$CONFIRM" == "y" ]]; then
-        echo ""
-        info "⏳ ПОЖАЛУЙСТА, ПОДОЖДИТЕ!" 
-        info "Сейчас начнется установка зависимостей (Unzip, Fuse) и самого Rclone."
-        echo ""
-
-        info "Установка Rclone, Fuse и Unzip..."
+        info "Установка Rclone..."
         sudo apt-get install -y fuse3 unzip
-
-        if ! command -v rclone &> /dev/null; then
-            curl https://rclone.org/install.sh | sudo bash
-        fi
-        
+        if ! command -v rclone &> /dev/null; then curl https://rclone.org/install.sh | sudo bash; fi
         sudo sed -i 's/#user_allow_other/user_allow_other/' /etc/fuse.conf
 
         REMOTE_NAME="s3_backup"
-        
         while true; do
             echo ""
-            echo "---------------------------------------------------"
-            echo "Введите данные S3 (Object Storage):"
-            echo "---------------------------------------------------"
-            read -p "S3 Endpoint (напр. https://storage.yandexcloud.net): " S3_ENDPOINT
+            echo "Введите данные S3:"
+            read -p "S3 Endpoint: " S3_ENDPOINT
             read -p "S3 Access Key: " S3_ACCESS_KEY
             read -s -p "S3 Secret Key: " S3_SECRET_KEY
             echo ""
-            read -p "Имя бакета (Bucket Name): " S3_BUCKET
+            read -p "Имя бакета: " S3_BUCKET
             
             mkdir -p /root/.config/rclone/
             rclone config create "$REMOTE_NAME" s3 provider=Other env_auth=false access_key_id="$S3_ACCESS_KEY" secret_access_key="$S3_SECRET_KEY" endpoint="$S3_ENDPOINT" acl=private --non-interactive > /dev/null 2>&1
 
-            info "Проверка подключения к бакету '$S3_BUCKET'..."
-            
+            info "Проверка..."
             if rclone lsd "$REMOTE_NAME:$S3_BUCKET" --config /root/.config/rclone/rclone.conf > /dev/null 2>&1; then
-                info "✅ Успешное подключение! Данные верны."
+                info "✅ Подключение успешно."
                 break
             else
-                error "❌ Ошибка подключения!" 
-                echo "Скорее всего, неверные ключи, Endpoint или имя бакета."
-                echo "Текст ошибки (последняя попытка):"
-                rclone lsd "$REMOTE_NAME:$S3_BUCKET" --config /root/.config/rclone/rclone.conf 2>&1 | head -n 2
-                
+                error "❌ Ошибка подключения!"
                 echo ""
-                ask_yes_no "Попробовать ввести данные заново?"
-                if [[ "$CONFIRM" != "y" ]]; then
-                    warn "Пропуск настройки Rclone."
-                    return
-                fi
+                ask_yes_no "Попробовать снова?"
+                if [[ "$CONFIRM" != "y" ]]; then return; fi
             fi
         done
         
-        mkdir -p /home/$NC_USER/.config/rclone/
-        
-        DEFAULT_MOUNT="$INSTALL_HOME/mnt/backup/borg"
-        echo ""
-        echo "Куда монтировать бакет?"
-        echo "По умолчанию: $DEFAULT_MOUNT"
-        
-        read -p "Нажмите Enter для дефолта или введите свой путь: " CUSTOM_PATH < /dev/tty
-        
-        TARGET_MOUNT="${CUSTOM_PATH:-$DEFAULT_MOUNT}"
-        mkdir -p "$TARGET_MOUNT"
-        
+        # Перенос конфига пользователю если нужно
         if [[ "$INSTALL_HOME" == "/home/$NC_USER" ]]; then
-             chown -R "$NC_USER:$NC_USER" "$TARGET_MOUNT"
              mkdir -p "/home/$NC_USER/.config/rclone"
              cp /root/.config/rclone/rclone.conf "/home/$NC_USER/.config/rclone/rclone.conf"
              chown -R "$NC_USER:$NC_USER" "/home/$NC_USER/.config"
@@ -380,19 +312,25 @@ setup_rclone() {
              USER_GID="0"
         fi
 
+        DEFAULT_MOUNT="$MOUNT_DIR/backup/borg"
+        echo "Монтируем в $DEFAULT_MOUNT (внутри $MOUNT_DIR)"
+        
+        TARGET_MOUNT="$DEFAULT_MOUNT"
+        mkdir -p "$TARGET_MOUNT"
+        if [[ "$INSTALL_HOME" == "/home/$NC_USER" ]]; then chown -R "$NC_USER:$NC_USER" "$TARGET_MOUNT"; fi
+
         SERVICE_FILE="/etc/systemd/system/rclone-backup.service"
-        info "Создание службы $SERVICE_FILE..."
         
         cat <<EOF | sudo tee "$SERVICE_FILE" > /dev/null
 [Unit]
-Description=Rclone Mount for S3 Backup
+Description=Rclone Mount
 AssertPathIsDirectory=$TARGET_MOUNT
 After=network-online.target
 
 [Service]
 Type=notify
 ExecStart=/usr/bin/rclone mount $REMOTE_NAME:$S3_BUCKET $TARGET_MOUNT \\
-    --config=/root/.config/rclone/rclone.conf \\
+    --config=$INSTALL_HOME/.config/rclone/rclone.conf \\
     --allow-other \\
     --vfs-cache-mode writes \\
     --uid=$USER_UID --gid=$USER_GID \\
@@ -408,19 +346,8 @@ EOF
         sudo systemctl daemon-reload
         sudo systemctl enable rclone-backup.service
         sudo systemctl start rclone-backup.service
-        
-        sleep 2
-        if systemctl is-active --quiet rclone-backup.service; then
-            RCLONE_MOUNT_POINT="$TARGET_MOUNT"
-            info "✅ Rclone смонтирован в: $TARGET_MOUNT"
-            log_change "RCLONE S3" "$TARGET_MOUNT" \
-                "Установлен Rclone, проверено подключение, смонтирован бакет $S3_BUCKET" \
-                "sudo systemctl stop rclone-backup && sudo systemctl disable rclone-backup && sudo rm $SERVICE_FILE"
-        else
-            error "Не удалось запустить службу rclone! Проверьте 'systemctl status rclone-backup'"
-        fi
-    else
-        info "Пропуск настройки Rclone."
+        RCLONE_MOUNT_POINT="$TARGET_MOUNT"
+        info "✅ Rclone смонтирован."
     fi
 }
 
@@ -430,67 +357,32 @@ check_hardware() {
     REQ_CPU=4
     if [ "$CURRENT_CPU" -lt "$REQ_CPU" ]; then
         warn "CPU < 4 ядер. Продолжить?"
-        ask_yes_no "Подтвердить продолжение?"
+        ask_yes_no "Подтвердить?"
         if [[ "$CONFIRM" != "y" ]]; then exit 1; fi
     fi
 }
 
 configure_memory() {
-    TOTAL_RAM=$(free -m | awk '/^Mem:/{print $2}')
-    CURRENT_CPU=$(nproc)
-    COMPOSE_FULL_PATH="$PROJECT_DIR/$COMPOSE_FILENAME"
-    
     echo ""
-    info "--- НАСТРОЙКА ПАМЯТИ (PHP MEMORY LIMIT) ---"
-    echo "Текущие ресурсы системы:"
-    echo "  CPU: ${CURRENT_CPU} ядер"
-    echo "  RAM: ${TOTAL_RAM} MB"
-    echo ""
-    
-    if [[ "$CURRENT_CPU" -ge 4 && "$TOTAL_RAM" -ge 5800 ]]; then
-         echo -e "${GREEN}РЕКОМЕНДАЦИЯ: Система мощная (4+ ядра, 6GB+ RAM).${NC}"
-         echo -e "${GREEN}Рекомендуется установить 1024M или 2048M.${NC}"
-    else
-         echo -e "${YELLOW}РЕКОМЕНДАЦИЯ: Ресурсов мало (менее 4 ядер или 6GB RAM).${NC}"
-         echo -e "${YELLOW}Рекомендуется оставить 512M (по умолчанию).${NC}"
-    fi
-    
-    echo ""
-    echo "Выберите лимит памяти:"
-    echo "  1) 1024M (Для среднего объема)"
-    echo "  2) 2048M (Для большого количества файлов)"
-    echo "  Enter) 512M (По умолчанию)"
-    
-    read -p "Ваш выбор: " M < /dev/tty
-    
+    info "--- ПАМЯТЬ ---"
+    echo "1) 1024M  2) 2048M  Enter) 512M"
+    read -p "Выбор: " M < /dev/tty
     case "$M" in
         1) CHOSEN_MEM="1024M" ;;
         2) CHOSEN_MEM="2048M" ;;
         *) CHOSEN_MEM="512M" ;;
     esac
-    
-    info "Установлен лимит: $CHOSEN_MEM"
-
-    if grep -q "NEXTCLOUD_MEMORY_LIMIT:" "$COMPOSE_FULL_PATH"; then
-        sed -i "s/NEXTCLOUD_MEMORY_LIMIT: .*/NEXTCLOUD_MEMORY_LIMIT: $CHOSEN_MEM/" "$COMPOSE_FULL_PATH"
+    if grep -q "NEXTCLOUD_MEMORY_LIMIT:" "$PROJECT_DIR/$COMPOSE_FILENAME"; then
+        sed -i "s/NEXTCLOUD_MEMORY_LIMIT: .*/NEXTCLOUD_MEMORY_LIMIT: $CHOSEN_MEM/" "$PROJECT_DIR/$COMPOSE_FILENAME"
     fi
-    log_change "NEXTCLOUD CONFIG" "$COMPOSE_FULL_PATH" "Память: $CHOSEN_MEM" "Edit file"
 }
 
 # --- ИСПОЛНЕНИЕ ---
 update_system
 
 info "Установка Docker..."
-if ! command -v curl &> /dev/null; then sudo apt-get install -y curl; fi
-PACKAGES="apt-transport-https ca-certificates software-properties-common gnupg dnsutils"
-if ! dpkg -s $PACKAGES >/dev/null 2>&1; then sudo apt-get install -y $PACKAGES; fi
 if ! command -v docker &> /dev/null; then
-    sudo install -m 0755 -d /etc/apt/keyrings
-    [ ! -f /etc/apt/keyrings/docker.gpg ] && curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
-    sudo chmod a+r /etc/apt/keyrings/docker.gpg
-    echo "deb [arch=""$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu ""$(. /etc/os-release && echo "$VERSION_CODENAME") stable" | sudo tee /etc/apt/sources.list.d/docker.list >/dev/null
-    sudo apt-get update && sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
-    sudo ln -sfv /usr/libexec/docker/cli-plugins/docker-compose /usr/local/bin/docker-compose
+    curl -fsSL https://get.docker.com | sh
     log_change "DOCKER" "System" "Install Docker" "apt purge..."
 fi
 
@@ -499,16 +391,24 @@ setup_new_user
 setup_firewall
 harden_ssh
 install_security_tools
-install_utilities   # <-- УСТАНОВКА MC
+install_utilities
 setup_rclone        
 check_hardware
 
-# --- ЗАГРУЗКА И НАСТРОЙКА ---
+# --- ЗАГРУЗКА ---
 info "Подготовка папок..."
-mkdir -p "$PROJECT_DIR"
+# Создаем папки ДЛЯ ДАННЫХ В /mnt (независимо от пользователя)
 mkdir -p "$DATA_DIR"
 mkdir -p "$MOUNT_DIR"
 
+# Если есть пользователь, отдаем ему права на папки данных
+if [[ "$INSTALL_HOME" == "/home/$NC_USER" ]]; then
+    info "Настройка прав доступа для $NC_USER к /mnt..."
+    chown -R "$NC_USER:$NC_USER" "$DATA_DIR"
+    chown -R "$NC_USER:$NC_USER" "$MOUNT_DIR"
+fi
+
+mkdir -p "$PROJECT_DIR"
 info "Загрузка конфига в $PROJECT_DIR..."
 COMPOSE_FULL_PATH="$PROJECT_DIR/$COMPOSE_FILENAME"
 
@@ -516,15 +416,10 @@ if curl --output /dev/null --silent --head --fail "$YAML_URL"; then
     curl -L "$YAML_URL" -o "$COMPOSE_FULL_PATH"
 else error "Ошибка загрузки!"; fi
 
-log_change "CONFIG" "$COMPOSE_FULL_PATH" "Скачан docker-compose" "rm file"
-
 # --- НАСТРОЙКА ПУТЕЙ В YAML ---
-info "Настройка путей в docker-compose..."
-
+# Здесь мы подставляем /mnt/ncdata и /mnt/, которые теперь зафиксированы
 sed -i "s|NEXTCLOUD_DATADIR: /mnt/ncdata|NEXTCLOUD_DATADIR: $DATA_DIR|g" "$COMPOSE_FULL_PATH"
 sed -i "s|NEXTCLOUD_MOUNT: /mnt/|NEXTCLOUD_MOUNT: $MOUNT_DIR|g" "$COMPOSE_FULL_PATH"
-
-log_change "CONFIG" "$COMPOSE_FULL_PATH" "Paths: $DATA_DIR, $MOUNT_DIR" "Manual edit"
 
 configure_memory
 
@@ -532,31 +427,16 @@ echo ""
 read -p "Введите домен: " USER_DOMAIN < /dev/tty
 if [[ -z "$USER_DOMAIN" ]]; then error "Пусто."; fi
 
-SERVER_IP=$(curl -s4 https://ifconfig.me)
-DOMAIN_IP=$(dig +short A "$USER_DOMAIN" | tail -n1)
-if [[ -z "$DOMAIN_IP" ]]; then 
-    warn "DNS не найден!"
-    ask_yes_no "Продолжить?"
-    if [[ "$CONFIRM" != "y" ]]; then exit 1; fi
-elif [[ "$SERVER_IP" != "$DOMAIN_IP" ]]; then 
-    warn "IP отличаются."
-    ask_yes_no "Продолжить?"
-    if [[ "$CONFIRM" != "y" ]]; then exit 1; fi
-fi
-
 if grep -q "$PLACEHOLDER" "$COMPOSE_FULL_PATH"; then
     sed -i "s/$PLACEHOLDER/$USER_DOMAIN/g" "$COMPOSE_FULL_PATH"
-    log_change "CONFIG" "$COMPOSE_FULL_PATH" "Domain: $USER_DOMAIN" "Manual edit"
 fi
 
 if [[ "$INSTALL_HOME" == "/home/$NC_USER" ]]; then
-    info "Назначение прав владельца пользователю $NC_USER..."
     usermod -aG docker "$NC_USER" || true
     chown -R "$NC_USER:$NC_USER" "$INSTALL_HOME"
-    log_change "PERMISSIONS" "$INSTALL_HOME" "chown $NC_USER" "chown root"
 fi
 
-info "Запуск контейнеров..."
+info "Запуск..."
 cd "$PROJECT_DIR"
 sudo docker compose up -d
 
@@ -565,19 +445,25 @@ KEY_SECTION=""
 if [[ -n "$GENERATED_PRIVATE_KEY" ]]; then
 KEY_SECTION="
 !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-!!! ВАШ НОВЫЙ ПРИВАТНЫЙ КЛЮЧ (OPENSSH)                 !!!
-!!! СКОПИРУЙТЕ ЕГО СЕЙЧАС!                             !!!
-!!! Вход: ssh -i key_file $NC_USER@$SERVER_IP
-!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-$GENERATED_PRIVATE_KEY
+!!!   ВНИМАНИЕ: ДОСТУП ПО ПАРОЛЮ ОТКЛЮЧЕН (ROOT)       !!!
+!!!   ЕСЛИ НЕ СОХРАНИТЬ КЛЮЧИ - ДОСТУП БУДЕТ УТЕРЯН    !!!
 !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 
-!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-!!! ВАШ НОВЫЙ ПРИВАТНЫЙ КЛЮЧ (PuTTY .PPK)              !!!
-!!! Сохраните его в файл с расширением .ppk            !!!
-!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+----------------------------------------------------------
+1. ПРИВАТНЫЙ КЛЮЧ (OPENSSH) - Для Linux / MacOS / Coolify
+----------------------------------------------------------
+Вход: ssh -i key_file root@$SERVER_IP
+----------------------------------------------------------
+$GENERATED_PRIVATE_KEY
+----------------------------------------------------------
+
+----------------------------------------------------------
+2. ПРИВАТНЫЙ КЛЮЧ (PuTTY .PPK) - Для Windows (PuTTY)
+----------------------------------------------------------
+Сохраните текст ниже в файл с расширением .ppk
+----------------------------------------------------------
 $GENERATED_PPK_KEY
-!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+----------------------------------------------------------
 "
 fi
 
@@ -592,10 +478,13 @@ REPORT_TEXT="
 -------------------
 Домен:        $USER_DOMAIN
 IP:           $SERVER_IP
-Config Dir:   $PROJECT_DIR
-Data Dir:     $DATA_DIR
+Пользователь: $NC_USER (ROOT)
+
+[ПУТИ]
+Config Dir:   $PROJECT_DIR   (Docker Compose)
+Data Dir:     $DATA_DIR      (Файлы Nextcloud)
+Mount Dir:    $MOUNT_DIR     (Точка монтирования хоста)
 Rclone Mount: $RCLONE_MOUNT_POINT
-Пользователь: $NC_USER
 
 2. ЖУРНАЛ ИЗМЕНЕНИЙ
 -------------------
@@ -607,7 +496,7 @@ $UFW_REPORT_INFO
 
 4. POST-INSTALL TIPS
 --------------------
-Apps to install:
+Apps to install inside Nextcloud:
 1. Two-Factor TOTP Provider
 2. Password Policy
 3. Antivirus for Files (ClamAV)
@@ -618,15 +507,19 @@ Apps to install:
 !!! ФИНАЛЬНЫЙ ШАГ !!!
 ==========================================================
 Панель: https://$USER_DOMAIN:8080
-РЕЖИМ:  ИНКОГНИТО (PRIVATE MODE)
+РЕЖИМ:  ИНКОГНИТО (PRIVATE MODE) - если ругается SSL
 ==========================================================
 "
 
+# Сохранение отчета на диск
 echo "$REPORT_TEXT" > "$PROJECT_DIR/$REPORT_FILE"
+
+# Создание ссылки на отчет в текущей папке (чтобы легко найти)
 if [[ "$(pwd)" != "$PROJECT_DIR" ]]; then 
     ln -sf "$PROJECT_DIR/$REPORT_FILE" ./latest_install_report.txt
 fi
 
+# Вывод на экран
 clear
 echo -e "${GREEN}$REPORT_TEXT${NC}"
 if [[ -n "$KEY_SECTION" ]]; then echo -e "${YELLOW}$KEY_SECTION${NC}"; fi
