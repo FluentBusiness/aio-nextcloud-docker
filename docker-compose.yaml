@@ -21,7 +21,7 @@ services:
     environment:
       # --- 1. Настройки для работы через Caddy (ОБЯЗАТЕЛЬНО) ---
       APACHE_PORT: 11000            # Порт, на который Caddy будет пересылать запросы
-      APACHE_IP_BINDING: 127.0.0.1  # Слушаем только локально для безопасности
+      APACHE_IP_BINDING: 0.0.0.0  # Слушаем только локально для безопасности
 
       # --- 2. Производительность (РЕКОМЕНДУЮ НАСТРОИТЬ) ---
       # NEXTCLOUD_UPLOAD_LIMIT: 16G     # Рекомендую увеличить, если планируете грузить видео/большие архивы
@@ -97,8 +97,11 @@ volumes:
   caddy_data:
   caddy_sites:
 
-# networks:
-#   nextcloud-aio:
-#     name: nextcloud-aio
-#     driver_opts:
-#       com.docker.network.driver.mtu: 1440
+networks:
+  nextcloud-aio:
+    name: nextcloud-aio
+    driver: bridge
+    driver_opts:
+      # Уменьшаем размер пакета до 1440. Это "безопасное" значение, 
+      # которое работает почти на всех VPS и предотвращает обрывы связи между контейнерами.
+      com.docker.network.driver.mtu: "1440"

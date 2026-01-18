@@ -176,7 +176,7 @@ setup_firewall() {
         sudo ufw default deny incoming
         sudo ufw default allow outgoing
         
-        # Настройка правил
+        # Настройка внешних портов
         sudo ufw allow 22/tcp comment 'SSH'
         sudo ufw allow 80/tcp comment 'HTTP Nextcloud'
         sudo ufw allow 443/tcp comment 'HTTPS Nextcloud'
@@ -185,26 +185,26 @@ setup_firewall() {
         sudo ufw allow 3478/tcp comment 'Talk TURN TCP'
         sudo ufw allow 3478/udp comment 'Talk TURN UDP'
         
+        # --- ВАЖНОЕ ИСПРАВЛЕНИЕ ДЛЯ FLOW И DOCKER ---
+        # Разрешаем весь трафик внутри интерфейса Docker (docker0)
+        # Это позволяет контейнерам (Nextcloud <-> Flow) видеть друг друга
+        sudo ufw allow in on docker0 comment 'Allow Docker Bridge Traffic'
+        
+        # Разрешаем трафик из стандартных подсетей Docker
+        sudo ufw allow from 172.16.0.0/12 comment 'Allow Docker Subnet'
+        # --------------------------------------------
+        
         echo "y" | sudo ufw enable
         
-        info "✅ UFW активен."
+        info "✅ UFW активен (с правилами для Docker)."
         
-        # Формирование детального текста для отчета
+        # Обновляем отчет
         UFW_REPORT_INFO="
-СТАТУС: Активен (Active)
-ПОЛИТИКА ПО УМОЛЧАНИЮ: Deny Incoming / Allow Outgoing
-
-ОТКРЫТЫЕ ПОРТЫ:
-  - 22/tcp   : SSH (Удаленный доступ)
-  - 80/tcp   : HTTP (Веб-сервер / Let's Encrypt)
-  - 443/tcp  : HTTPS (Основной трафик)
-  - 443/udp  : HTTP/3 (QUIC протокол)
-  - 8080/tcp : Панель управления AIO
-  - 3478/tcp : Nextcloud Talk (TURN)
-  - 3478/udp : Nextcloud Talk (TURN)
+СТАТУС: Активен
+DOCKER TRAFFIC: Разрешен (docker0, 172.16.0.0/12)
+ОТКРЫТЫЕ ПОРТЫ: 22, 80, 443, 8080, 3478
 "
-        
-        log_change "FIREWALL" "UFW" "Включен UFW, открыты порты 22,80,443,8080,3478" "sudo ufw disable"
+        log_change "FIREWALL" "UFW" "Включен UFW + Правила Docker Internal" "sudo ufw disable"
     fi
 }
 
