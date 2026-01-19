@@ -118,6 +118,9 @@ bash <(curl -sL https://raw.githubusercontent.com/FluentBusiness/aio-nextcloud-d
 
 ---
 
+## 🔐 Обновление 
+https://github.com/nextcloud/all-in-one/discussions/5133
+
 ## 📝 Лицензия
 
 MIT License. Используйте на свой страх и риск. Перед запуском на продакшн-серверах рекомендуется сделать бэкап.
